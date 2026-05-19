@@ -12,6 +12,9 @@ cargo run -p indexer -- --from-block 18000000 --to-block 18001000
 # follow the chain head continuously (Ctrl-C to stop)
 cargo run -p indexer -- --follow
 cargo run -p indexer -- --follow --poll-interval-secs 6 --confirmations 20
+
+# drive cycles by a newHeads subscription instead of polling (opt-in, D011)
+WS_URL=wss://… cargo run -p indexer -- --follow --subscribe
 ```
 
 | Flag | Default | Meaning |
@@ -19,9 +22,13 @@ cargo run -p indexer -- --follow --poll-interval-secs 6 --confirmations 20
 | `--follow` | off | Continuous head-follow instead of a fixed range. |
 | `--poll-interval-secs` | 12 | Sleep between head polls. |
 | `--confirmations` | 12 | Index only up to `head - N` (shallow-reorg cushion). |
+| `--subscribe` | off | Drive cycles by a `newHeads` subscription; needs `WS_URL`. Falls back to polling if WS is unset/unavailable (D011). |
 
 `--from-block` is **optional** with `--follow` (resume point comes from the
 `indexer_checkpoint`, not the CLI). `--to-block` is ignored with `--follow`.
+`WS_URL` is read from the environment (not a CLI flag — it can carry an API
+key, so it is **never logged**). `--subscribe` without a usable `WS_URL`
+just runs polling (no error, no regression).
 
 ## How it works
 
@@ -61,6 +68,24 @@ These counters live in process memory only (not persisted) and are
 **observation-only**: branch flow, timing, RPC/DB calls are unchanged
 (no behavior/perf regression).
 
+## Subscribe trigger (S07-T02, D011)
+
+By default each cycle is woken by `sleep(--poll-interval-secs)`. With
+`--subscribe` **and** a usable `WS_URL`, a background task subscribes to
+`newHeads` and ticks the loop on every new head instead — latency is no
+longer bounded by the poll interval. **Only the trigger changes**: the
+reorg check, `next_target`, and `index_range` are byte-for-byte identical.
+
+Pure/testable split (same philosophy as `next_target`/`find_fork_point`):
+`resolve_trigger_mode(subscribe, ws_url)` decides Polling vs Subscribe
+(trims the URL; blank ⇒ Polling) and is unit-tested without WS/RPC. The
+live WS task is compile + clippy checked and manually smoked.
+
+Fallback is unconditional (no regression): WS connect failure, subscribe
+failure, or stream end closes the tick channel and the loop **reverts to
+polling** automatically. The WS URL is **never logged** (it can carry a
+secret); only the mode label (`polling`/`subscribe`) appears.
+
 ## Reorg detection & correction (S06)
 
 Every poll, *before* indexing, the loop compares the most recent local block
@@ -84,7 +109,8 @@ then re-indexes on the next iteration.
 
 ## Limits / scope (see `.gsd/DECISIONS.md` D009, D010)
 
-- Polling, not `eth_subscribe` (→ S07).
+- Polling **by default**; `eth_subscribe` (`newHeads`) is opt-in via
+  `--subscribe` + `WS_URL`, with automatic polling fallback (S07-T02, D011).
 - Reorgs **within** the scan window are detected & corrected exactly (S06).
   Reorgs **deeper than** the window are under-corrected (stale pre-window
   blocks retained → potential silent inconsistency) — low practical risk on
@@ -98,7 +124,7 @@ The follow loop needs a live `RPC_URL`, which CI may not have. So the
 **decision logic is verified without RPC**:
 
 ```bash
-cargo test -p indexer        # next_target + find_fork_point unit tests (no RPC/DB)
+cargo test -p indexer        # next_target + find_fork_point + resolve_trigger_mode (no RPC/DB/WS)
 cargo test -p db -- --ignored # rollback_from_block idempotency (needs Postgres)
 ```
 
@@ -108,6 +134,13 @@ Live smoke (manual, requires RPC + Postgres):
 export DATABASE_URL=postgres://defi:defi@localhost:5432/defi_analytics
 export RPC_URL=<an ethereum rpc endpoint>
 cargo run -p indexer -- --follow --poll-interval-secs 6
-# expect: "follow mode started", periodic "indexing new range" logs,
-#         checkpoint advancing; Ctrl-C → "stopping follow loop"
+# expect: "follow mode started" (trigger=polling), periodic "indexing new
+#         range" logs, checkpoint advancing; Ctrl-C → "stopping follow loop"
+
+# subscribe trigger (also needs a WS endpoint):
+export WS_URL=wss://<an ethereum ws endpoint>
+cargo run -p indexer -- --follow --subscribe
+# expect: "follow mode started" with trigger=subscribe, then "subscribe
+#         mode: newHeads subscription active", cycles ticking on new heads.
+#         Unset/unreachable WS → "falling back to polling" (no crash).
 ```
