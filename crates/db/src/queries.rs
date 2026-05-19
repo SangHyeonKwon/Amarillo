@@ -3,9 +3,9 @@ use sqlx::PgPool;
 
 use crate::error::DbError;
 use crate::models::{
-    Block, DailySwapVolume, ErrorCategory, FailedTransaction, FailedTxAnalysis, LiquidityEvent,
-    LiquidityEventType, Pool, PoolStats, PriceSnapshot, SnapshotInterval, SwapEvent, Token,
-    TokenTransfer, TopTrader, TraceLog, Transaction, UserProfile,
+    Block, DailySwapVolume, ErrorCategory, FailedTransaction, FailedTxAnalysis, FailedTxTrendPoint,
+    LiquidityEvent, LiquidityEventType, Pool, PoolStats, PriceSnapshot, SnapshotInterval,
+    SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader, TraceLog, Transaction, UserProfile,
 };
 
 /// PostgreSQL enum 값으로 변환하는 헬퍼.
@@ -564,6 +564,140 @@ pub async fn get_failed_tx_analysis(pool: &PgPool) -> Result<Vec<FailedTxAnalysi
     let rows = sqlx::query_as::<_, FailedTxAnalysis>("SELECT * FROM vw_failed_tx_analysis")
         .fetch_all(pool)
         .await?;
+    Ok(rows)
+}
+
+/// tx 해시로 단건 실패 트랜잭션을 조회한다.
+///
+/// 해당 해시의 실패 기록이 없으면 [`DbError::NotFound`]를 반환한다.
+#[tracing::instrument(skip(pool))]
+pub async fn get_failed_transaction(
+    pool: &PgPool,
+    tx_hash: &str,
+) -> Result<FailedTransaction, DbError> {
+    sqlx::query_as::<_, FailedTransaction>(
+        "SELECT tx_hash, error_category, revert_reason, failing_function, gas_used, timestamp
+         FROM failed_transaction WHERE tx_hash = $1",
+    )
+    .bind(tx_hash)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("failed transaction {tx_hash}")))
+}
+
+/// tx 해시의 평탄화된 콜 트레이스를 호출 순서(pre-order DFS)대로, 최대 `limit`개 조회한다.
+///
+/// `trace_id`(BIGSERIAL)는 인덱서가 콜트리를 pre-order로 평탄화하며 삽입한
+/// 순서를 그대로 보존하므로, `trace_id ASC` = 올바른 트리 선형순서다.
+/// `call_depth`로 먼저 정렬하면 형제 서브트리가 섞여 트리 복원이 불가능하다.
+/// 호출자는 잘림 감지를 위해 `limit = 상한 + 1`로 조회할 수 있다.
+/// 트레이스가 없으면 빈 `Vec`을 반환한다(에러 아님).
+#[tracing::instrument(skip(pool))]
+pub async fn list_trace_logs_by_tx(
+    pool: &PgPool,
+    tx_hash: &str,
+    limit: i64,
+) -> Result<Vec<TraceLog>, DbError> {
+    let logs = sqlx::query_as::<_, TraceLog>(
+        "SELECT tx_hash, call_depth, call_type, from_addr, to_addr, value,
+                gas_used, input, output, error, trace_id
+         FROM trace_log WHERE tx_hash = $1
+         ORDER BY trace_id ASC
+         LIMIT $2",
+    )
+    .bind(tx_hash)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(logs)
+}
+
+/// 실패 트랜잭션을 필터·페이지네이션하여 조회한다.
+///
+/// `category`/`from`/`to`는 모두 선택 — `None`이면 해당 필터를 적용하지 않는다
+/// (단일 prepared statement, 동적 SQL 미사용). `timestamp DESC` 정렬.
+/// 전체 건수는 [`count_failed_transactions`]로 별도 조회한다.
+#[tracing::instrument(skip(pool))]
+pub async fn list_failed_transactions(
+    pool: &PgPool,
+    category: Option<&ErrorCategory>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<FailedTransaction>, DbError> {
+    let cat = category.map(error_category_to_sql);
+    let rows = sqlx::query_as::<_, FailedTransaction>(
+        "SELECT tx_hash, error_category, revert_reason, failing_function, gas_used, timestamp
+         FROM failed_transaction
+         WHERE ($1::TEXT IS NULL OR error_category = $1::error_category)
+           AND ($2::TIMESTAMPTZ IS NULL OR timestamp >= $2)
+           AND ($3::TIMESTAMPTZ IS NULL OR timestamp <= $3)
+         ORDER BY timestamp DESC
+         LIMIT $4 OFFSET $5",
+    )
+    .bind(cat)
+    .bind(from)
+    .bind(to)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// [`list_failed_transactions`]와 동일 필터의 전체 건수를 반환한다.
+///
+/// 페이지네이션 `total` 메타데이터 산출용 — `LIMIT`/`OFFSET`과 무관하다.
+#[tracing::instrument(skip(pool))]
+pub async fn count_failed_transactions(
+    pool: &PgPool,
+    category: Option<&ErrorCategory>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<i64, DbError> {
+    let cat = category.map(error_category_to_sql);
+    let total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM failed_transaction
+         WHERE ($1::TEXT IS NULL OR error_category = $1::error_category)
+           AND ($2::TIMESTAMPTZ IS NULL OR timestamp >= $2)
+           AND ($3::TIMESTAMPTZ IS NULL OR timestamp <= $3)",
+    )
+    .bind(cat)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+    Ok(total)
+}
+
+/// 실패 트랜잭션을 시간 버킷 × 카테고리로 집계한다.
+///
+/// `bucket`은 화이트리스트 [`TimeBucket`]만 받아 `date_trunc($1, timestamp)`에
+/// **바인딩 파라미터**로 전달한다 (문자열 보간 금지 — SQL 인젝션 방지).
+/// `from`/`to`는 선택. `bucket ASC, error_category ASC` 정렬.
+#[tracing::instrument(skip(pool))]
+pub async fn failed_tx_timeseries(
+    pool: &PgPool,
+    bucket: &TimeBucket,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<Vec<FailedTxTrendPoint>, DbError> {
+    let rows = sqlx::query_as::<_, FailedTxTrendPoint>(
+        "SELECT date_trunc($1, timestamp) AS bucket,
+                error_category,
+                COUNT(*) AS failure_count
+         FROM failed_transaction
+         WHERE ($2::TIMESTAMPTZ IS NULL OR timestamp >= $2)
+           AND ($3::TIMESTAMPTZ IS NULL OR timestamp <= $3)
+         GROUP BY 1, 2
+         ORDER BY 1 ASC, 2 ASC",
+    )
+    .bind(bucket.as_pg())
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
     Ok(rows)
 }
 

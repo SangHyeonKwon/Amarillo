@@ -18,6 +18,59 @@ pub enum ErrorCategory {
     Unknown,
 }
 
+impl std::str::FromStr for ErrorCategory {
+    type Err = ();
+
+    /// 와이어 표현(SCREAMING_SNAKE_CASE) 문자열을 파싱한다.
+    ///
+    /// API 쿼리 파라미터 → 타입 변환의 단일 출처. 알 수 없는 값은 `Err(())`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "INSUFFICIENT_BALANCE" => Ok(Self::InsufficientBalance),
+            "SLIPPAGE_EXCEEDED" => Ok(Self::SlippageExceeded),
+            "DEADLINE_EXPIRED" => Ok(Self::DeadlineExpired),
+            "UNAUTHORIZED" => Ok(Self::Unauthorized),
+            "TRANSFER_FAILED" => Ok(Self::TransferFailed),
+            "UNKNOWN" => Ok(Self::Unknown),
+            _ => Err(()),
+        }
+    }
+}
+
+/// 시계열 버킷 단위 — `date_trunc`에 쓰일 화이트리스트(인젝션 방지).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeBucket {
+    Hour,
+    Day,
+    Week,
+}
+
+impl TimeBucket {
+    /// `date_trunc` 1번째 인자에 **바인딩**할 고정 텍스트 (사용자 입력 보간 아님).
+    pub fn as_pg(&self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+        }
+    }
+}
+
+impl std::str::FromStr for TimeBucket {
+    type Err = ();
+
+    /// `hour|day|week` 파싱. 알 수 없는 값은 `Err(())` (API에서 400).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "hour" => Ok(Self::Hour),
+            "day" => Ok(Self::Day),
+            "week" => Ok(Self::Week),
+            _ => Err(()),
+        }
+    }
+}
+
 /// 유동성 이벤트 타입 (Mint 또는 Burn).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::Type)]
 #[sqlx(
@@ -359,4 +412,29 @@ pub struct PoolStats {
     pub liquidity_events: i64,
     /// 추정 수수료 수익
     pub estimated_fees: BigDecimal,
+}
+
+/// 단건 실패 트랜잭션 진단 결과.
+///
+/// API 조립용 합성 구조체 — 테이블/뷰가 아니다. `failed_transaction` 1행과
+/// 해당 tx의 평탄화된 `trace_log` 콜트리(1:N)를 함께 담는다.
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedTxDetail {
+    /// 실패 트랜잭션 메타 + 분류 결과
+    pub failed: FailedTransaction,
+    /// 평탄화된 콜 프레임 (`trace_id` 오름차순 = pre-order DFS)
+    pub call_tree: Vec<TraceLog>,
+    /// `call_tree`가 상한에서 잘렸으면 `true` (부분 응답 신호)
+    pub call_tree_truncated: bool,
+}
+
+/// 실패 추이 시계열의 한 점 (failed_tx_timeseries).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct FailedTxTrendPoint {
+    /// 버킷 시작 시각 (`date_trunc` 결과)
+    pub bucket: DateTime<Utc>,
+    /// 에러 카테고리
+    pub error_category: ErrorCategory,
+    /// 해당 버킷·카테고리의 실패 건수
+    pub failure_count: i64,
 }
