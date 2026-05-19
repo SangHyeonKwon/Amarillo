@@ -85,6 +85,12 @@
 - **트레이드오프 & 후속**: 매 폴링 N RPC(S07 R2에서 tip→lazy 조회로 개선). 윈도우
   초과 reorg의 **완전 해소 = S07-T03**(윈도우를 cap까지 동적 확대해 진짜 최소
   공통조상까지 하강). **안전 규칙(불변)**: 체인 해시 불확실 시 절대 롤백 안 함.
+- **REALIZED (2026-05-20, S07-T03)**: lazy + 동적 확대 구현. `detect_fork`가
+  tip부터 on-demand 조회(정상=1 RPC → R2 해소)하고 윈도우 전부 불일치면
+  `next_scan_depth`로 ×4 확대해 `REORG_SCAN_CAP`(4096) 내 **진짜 최소 공통조상**
+  까지 롤백 → **under-delete 갭 제거(R1 해소)**. 잔여: 4096블록 초과 reorg만
+  best-effort floor(≈finality 64배 — 사실상 불가, 명시된 경계). 순수
+  `classify_fork`/`next_scan_depth` 단위테스트(8), 라이브 수동.
 
 ## D011 — 실시간 트리거: 폴링 기본, eth_subscribe 옵트인 (S07-T02)
 - **결정**: follow 사이클 트리거는 **폴링이 기본**(`sleep(poll)`). `--subscribe` +
