@@ -76,3 +76,7 @@ GSD-2: Rules(불변) + Patterns/Lessons(누적). 실행 전 반드시 읽는다.
 - **[S04] 무제한 컬렉션엔 상한+신호 (Pattern)**: 외부 노출 배열은 `LIMIT N+1` fetch로
   잘림 감지 후 N개로 자르고 `*_truncated: bool`로 부분응답 신호. 무제한 = 임베드 API의
   실제 DoS/성능 위험.
+- **[S05] IO 루프의 결정 로직은 순수 함수로 분리 (Pattern)**: 장기 실행/네트워크 루프는
+  "다음에 뭘 할지" 판단을 순수 함수(`next_target(head,conf,checkpoint)`)로 떼어내 RPC/DB
+  없이 단위테스트. 환경 의존 부분(폴링·sleep·signal)은 얇은 드라이버로. graceful 종료는
+  `tokio::select!{ sleep, ctrl_c }`. 신규 루프/데몬은 이 분리 준수.

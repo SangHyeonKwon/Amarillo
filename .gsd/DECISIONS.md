@@ -55,3 +55,14 @@
 - **이유**: 프레임워크는 의존성·매크로 침투(전 핸들러 어노테이션)로 그 자체가 한 유닛 이상.
   현재 엔드포인트 4개 규모엔 손작성이 ROI 우위. 규모 커지면 재검토.
 - **트레이드오프**: 손작성은 표류 위험 → 검증 스크립트/통합테스트가 실계약을 강제하므로 완화.
+
+## D009 — S05 실시간: poll + confirmations lag, eth_subscribe·깊은 reorg 보류
+- **결정**: S05 체인 헤드 팔로워는 ① `eth_subscribe`가 아니라 **polling**(get_block_number),
+  ② 헤드가 아니라 **head − N confirmations**까지만 인덱싱(얕은 reorg 노출 최소화).
+  `eth_subscribe`는 S07(하드닝), **깊은 reorg 감지·정정은 S06**으로 분리.
+- **이유**: polling은 RPC 호환성↑·구현 단순(연속 루프 학습에 집중). confirmations lag는
+  S06 전까지의 실용적 reorg 완화. 한 슬라이스 = 한 관심사(GSD-2).
+- **트레이드오프**: confirmations만큼 지연 발생(수 초~분) — REQUIREMENTS#M002 "수 초 내"는
+  S06/S07 합산으로 충족. 단순/안전 우선.
+- **검증 제약**: 실시간 follow는 `RPC_URL` 필요(CI/환경 부재 가능) → 순수 결정 로직
+  `next_target()`를 분리해 단위테스트(RPC 불요), 라이브 follow는 수동 스모크·문서.
