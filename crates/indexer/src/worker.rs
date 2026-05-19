@@ -91,7 +91,6 @@ impl WorkerPool {
             "follow mode started (Ctrl-C to stop)"
         );
 
-        let scan_depth = (confirmations as i64).max(64);
         let mut m = FollowMetrics::default();
 
         // 트리거: 구독 모드면 newHeads 틱 채널을 띄운다. 연결/구독 실패나
@@ -106,7 +105,7 @@ impl WorkerPool {
 
             // reorg 체크가 우선 — fork면 롤백 후 재인덱싱(되감긴 checkpoint).
             // 불확실(RPC 실패/블록 부재)이면 detect_fork가 None → 무작동(안전).
-            if let Some(fork) = self.detect_fork(&provider, scan_depth).await? {
+            if let Some(fork) = self.detect_fork(&provider, REORG_SCAN_CAP).await? {
                 tracing::warn!(cycle = m.cycle, fork, "reorg detected — rolling back");
                 let rolled = db::queries::rollback_from_block(&self.db_pool, fork as i64).await?;
                 m.reorgs += 1;
@@ -199,15 +198,16 @@ impl WorkerPool {
 
     /// 최근 로컬 블록 해시를 체인과 대조해 reorg fork point를 찾는다.
     ///
-    /// RPC 조회 불가/블록 부재(불확실)면 `None`을 반환한다 — 파괴적 롤백의
-    /// false positive 방지(안전 규칙). 비동기 사전조회로 체인 해시 맵을 만든 뒤
-    /// 순수 [`find_fork_point`]에 주입한다(테스트성·안전규칙 보존).
-    async fn detect_fork(
-        &self,
-        provider: &impl Provider,
-        scan_depth: i64,
-    ) -> anyhow::Result<Option<u64>> {
-        let local: Vec<(u64, String)> = db::queries::recent_block_hashes(&self.db_pool, scan_depth)
+    /// **lazy + 동적 확대** (R1/R2): tip부터 필요한 만큼만 체인 해시를 조회한다 —
+    /// 정상(tip 일치) 시 RPC 1회로 단락(R2). 윈도우 전체 불일치면 cap
+    /// (`REORG_SCAN_CAP`)까지 [`next_scan_depth`]로 배수 확대해 **진짜 최소
+    /// 공통조상**을 찾는다(R1: under-delete 갭 해소). 순수 판정은
+    /// [`classify_fork`]/[`next_scan_depth`]; 여기선 비동기 조회만 담당.
+    ///
+    /// RPC 조회 불가/블록 부재(불확실)면 `None` — 파괴적 롤백 false positive
+    /// 방지(안전 규칙 불변).
+    async fn detect_fork(&self, provider: &impl Provider, cap: i64) -> anyhow::Result<Option<u64>> {
+        let local: Vec<(u64, String)> = db::queries::recent_block_hashes(&self.db_pool, cap)
             .await?
             .into_iter()
             .map(|(n, h)| (n as u64, h))
@@ -215,27 +215,46 @@ impl WorkerPool {
         if local.is_empty() {
             return Ok(None);
         }
+        let len = local.len();
 
         let mut chain: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
-        for (height, _) in &local {
-            let h = *height;
-            let fetched = rpc_with_retry(|| async {
-                provider
-                    .get_block_by_number(BlockNumberOrTag::Number(h))
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e))
-            })
-            .await;
-            match fetched {
-                Ok(Some(block)) => {
-                    chain.insert(h, format!("0x{:x}", block.header.hash));
+        let mut depth = 1usize;
+        loop {
+            // 깊이 [0,depth) 중 미조회분만 lazy fetch (tip 일치면 1회로 끝 — R2)
+            for (height, _) in &local[..depth.min(len)] {
+                let h = *height;
+                if chain.contains_key(&h) {
+                    continue;
                 }
-                // 블록 부재(헤드 밖) 또는 RPC 실패 → 불확실: 이번 사이클 판단 보류
-                Ok(None) | Err(_) => return Ok(None),
+                let fetched = rpc_with_retry(|| async {
+                    provider
+                        .get_block_by_number(BlockNumberOrTag::Number(h))
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))
+                })
+                .await;
+                match fetched {
+                    Ok(Some(block)) => {
+                        chain.insert(h, format!("0x{:x}", block.header.hash));
+                    }
+                    // 블록 부재(헤드 밖) 또는 RPC 실패 → 불확실: 무롤백(안전)
+                    Ok(None) | Err(_) => return Ok(None),
+                }
+            }
+
+            match classify_fork(&local, |h| chain.get(&h).cloned(), depth) {
+                ForkScan::NoReorg | ForkScan::Inconclusive => return Ok(None),
+                ForkScan::Fork(f) => return Ok(Some(f)),
+                ForkScan::NeedDeeper => {
+                    let next = next_scan_depth(depth, len);
+                    if next == depth {
+                        // NeedDeeper면 depth<len이라 논리상 도달 불가 — 안전망
+                        return Ok(Some(local[len - 1].0));
+                    }
+                    depth = next;
+                }
             }
         }
-
-        Ok(find_fork_point(&local, |h| chain.get(&h).cloned()))
     }
 
     /// 단일 블록 청크를 처리한다.
@@ -669,32 +688,79 @@ pub fn next_target(
     }
 }
 
-/// reorg fork point를 찾는 순수 함수.
+/// reorg fork 탐색의 최대 깊이(cap). 윈도우 전체 불일치 시 여기까지 배수 확대해
+/// 진짜 최소 공통조상을 찾는다(R1: under-delete 갭 해소). ≈4096블록(메인넷
+/// 약 13.6h) — PoS finality(≈64)의 64배 마진. 로컬(자체 DB)은 한 번에 로드해도
+/// 저렴하고, 체인 해시는 lazy 조회라 정상 시 RPC 비용은 cap과 무관(R2).
+pub const REORG_SCAN_CAP: i64 = 4096;
+
+/// [`classify_fork`]의 판정 결과.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ForkScan {
+    /// tip부터 일치 — reorg 없음
+    NoReorg,
+    /// 높이 `f`부터(포함) 무효 → `rollback_from_block(f)`
+    Fork(u64),
+    /// 필요한 체인 해시 부재(불확실) — 안전 규칙: 무롤백
+    Inconclusive,
+    /// 본 깊이 전부 불일치 & 더 깊은 로컬 존재 → 호출자가 윈도우 확대
+    NeedDeeper,
+}
+
+/// reorg fork point를 찾는 **순수** 함수 — tip부터 `depth`개만 본다(lazy).
 ///
-/// `local`은 (블록번호, 로컬해시)를 **번호 내림차순(tip 먼저)** 으로, 연속 구간으로
-/// 받는다. `chain_hash_at`는 현재 체인의 해당 높이 해시(`None`이면 조회 불가).
+/// `local`은 (블록번호, 로컬해시)를 **번호 내림차순(tip 먼저)** 연속 구간으로
+/// 받는다. `chain_hash_at`는 해당 높이의 체인 해시(`None`=조회 불가).
 ///
-/// 반환 `Some(f)` = 높이 `f`부터(포함) 무효 → 롤백 floor. `None` = reorg 없음
-/// **또는 판단 불가**. 핵심 안전 규칙: 체인 해시가 `None`이면(RPC 불확실) 절대
-/// fork로 단정하지 않는다 — 파괴적 롤백의 false positive 방지.
-pub fn find_fork_point(
+/// - tip 일치 → [`ForkScan::NoReorg`] (정상 시 체인 조회 1회로 단락 — R2)
+/// - 불일치 후 일치 만남 → [`ForkScan::Fork`]`(최저 불일치 높이)` (정확 롤백)
+/// - 체인 해시 `None` → [`ForkScan::Inconclusive`] (안전 규칙: 무롤백)
+/// - `depth`까지 전부 불일치 & 로컬이 더 있음 → [`ForkScan::NeedDeeper`]
+///   (호출자가 [`next_scan_depth`]로 확대); 더 없으면 최저 로컬을 `Fork`(R1)
+pub fn classify_fork(
     local: &[(u64, String)],
     chain_hash_at: impl Fn(u64) -> Option<String>,
-) -> Option<u64> {
-    let mut fork: Option<u64> = None;
-    for (height, local_hash) in local {
+    depth: usize,
+) -> ForkScan {
+    let n = depth.min(local.len());
+    if n == 0 {
+        return ForkScan::NoReorg;
+    }
+    let mut last_mismatch: Option<u64> = None;
+    for (height, local_hash) in &local[..n] {
         match chain_hash_at(*height) {
-            // 불확실 → 파괴적 롤백을 거는 것보다 이번 사이클 스킵이 안전
-            None => return None,
+            // 불확실 → 파괴적 롤백보다 이번 사이클 스킵이 안전
+            None => return ForkScan::Inconclusive,
             Some(chain_hash) if &chain_hash == local_hash => {
-                // 일치: 이 높이 이하는 정상(체인 연결성) → 탐색 종료
-                return fork;
+                // 일치: 이 높이 이하는 정상(체인 연결성)
+                return match last_mismatch {
+                    Some(f) => ForkScan::Fork(f),
+                    None => ForkScan::NoReorg,
+                };
             }
-            Some(_) => fork = Some(*height), // 불일치: 롤백 floor 후보(계속 하강)
+            Some(_) => last_mismatch = Some(*height), // 불일치(계속 하강)
         }
     }
-    // 윈도우를 다 봐도 불일치 → reorg가 최소 이 깊이 이상(호출자가 윈도우 확대 가능)
-    fork
+    // [0,n) 전부 불일치
+    if n < local.len() {
+        ForkScan::NeedDeeper
+    } else {
+        // 더 깊은 로컬 없음 → 최선의 floor(= 최저 로컬 높이). cap이 커서 잔여
+        // 갭은 사실상 0이나, 도달 시 정직하게 best-effort 롤백.
+        match last_mismatch {
+            Some(f) => ForkScan::Fork(f),
+            None => ForkScan::NoReorg,
+        }
+    }
+}
+
+/// 윈도우 확대 폭(순수): 현재 깊이를 ×4로 키우되 `max`로 클램프, 항상 전진
+/// (`> current`)하도록 보장 → 종료성. `current >= max`면 `max`.
+pub fn next_scan_depth(current: usize, max: usize) -> usize {
+    if current >= max {
+        return max;
+    }
+    current.saturating_mul(4).clamp(current + 1, max)
 }
 
 /// follow 사이클을 무엇이 깨우는지(트리거)를 나타낸다.
@@ -776,7 +842,9 @@ fn spawn_head_ticks(ws_url: String) -> tokio::sync::mpsc::Receiver<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{find_fork_point, next_target, resolve_trigger_mode, TriggerMode};
+    use super::{
+        classify_fork, next_scan_depth, next_target, resolve_trigger_mode, ForkScan, TriggerMode,
+    };
 
     fn h(s: &str) -> String {
         s.to_string()
@@ -812,15 +880,16 @@ mod tests {
     }
 
     #[test]
-    fn fork_none_when_tip_matches() {
-        let local = [(100, h("a100")), (99, h("a99"))];
+    fn classify_no_reorg_when_tip_matches() {
+        let local = [(100u64, h("a100")), (99, h("a99"))];
         let chain = |n: u64| Some(format!("a{n}"));
-        assert_eq!(find_fork_point(&local, chain), None);
+        // tip 일치 → depth=1로 즉시 NoReorg (R2: 체인 조회 최소)
+        assert_eq!(classify_fork(&local, chain, 1), ForkScan::NoReorg);
     }
 
     #[test]
-    fn fork_tip_only() {
-        let local = [(100, h("old100")), (99, h("a99"))];
+    fn classify_fork_tip_only() {
+        let local = [(100u64, h("old100")), (99, h("a99"))];
         let chain = |n: u64| {
             Some(if n == 100 {
                 h("new100")
@@ -828,13 +897,13 @@ mod tests {
                 format!("a{n}")
             })
         };
-        assert_eq!(find_fork_point(&local, chain), Some(100));
+        assert_eq!(classify_fork(&local, chain, 2), ForkScan::Fork(100));
     }
 
     #[test]
-    fn fork_deeper_returns_lowest_invalid() {
-        // 100,99 reorged; 98 still matches → fork = 99
-        let local = [(100, h("o100")), (99, h("o99")), (98, h("a98"))];
+    fn classify_fork_deeper_returns_lowest_invalid() {
+        // 100,99 reorged; 98 matches → fork = 99
+        let local = [(100u64, h("o100")), (99, h("o99")), (98, h("a98"))];
         let chain = |n: u64| {
             Some(if n >= 99 {
                 format!("new{n}")
@@ -842,26 +911,42 @@ mod tests {
                 format!("a{n}")
             })
         };
-        assert_eq!(find_fork_point(&local, chain), Some(99));
+        assert_eq!(classify_fork(&local, chain, 3), ForkScan::Fork(99));
     }
 
     #[test]
-    fn fork_whole_window_mismatch_returns_floor() {
-        let local = [(100, h("o100")), (99, h("o99"))];
+    fn classify_need_deeper_then_floor_when_all_mismatch() {
+        // 본 깊이 전부 불일치 + 더 깊은 로컬 존재 → 확대 요청 (R1)
+        let local = [(100u64, h("o100")), (99, h("o99")), (98, h("o98"))];
         let chain = |n: u64| Some(format!("new{n}"));
-        assert_eq!(find_fork_point(&local, chain), Some(99));
+        assert_eq!(classify_fork(&local, &chain, 2), ForkScan::NeedDeeper);
+        // 전부 봤는데(더 깊은 로컬 없음) 다 불일치 → best-effort 최저 floor
+        assert_eq!(classify_fork(&local, &chain, 3), ForkScan::Fork(98));
     }
 
     #[test]
-    fn fork_inconclusive_rpc_is_safe_none() {
-        let local = [(100, h("o100")), (99, h("o99"))];
-        // 체인 조회 불가 → 절대 롤백 단정 금지
-        assert_eq!(find_fork_point(&local, |_| None), None);
+    fn classify_inconclusive_is_safe() {
+        let local = [(100u64, h("o100")), (99, h("o99"))];
+        // 체인 조회 불가 → 절대 롤백 단정 금지(안전 규칙 불변)
+        assert_eq!(classify_fork(&local, |_| None, 2), ForkScan::Inconclusive);
     }
 
     #[test]
-    fn fork_empty_local_is_none() {
-        assert_eq!(find_fork_point(&[], |_| Some(h("x"))), None);
+    fn classify_empty_local_is_no_reorg() {
+        assert_eq!(classify_fork(&[], |_| Some(h("x")), 8), ForkScan::NoReorg);
+    }
+
+    #[test]
+    fn next_scan_depth_widens_multiplicatively_and_terminates() {
+        // ×4 전진, max 클램프, 항상 증가 → 종료성
+        assert_eq!(next_scan_depth(1, 4096), 4);
+        assert_eq!(next_scan_depth(4, 4096), 16);
+        assert_eq!(next_scan_depth(16, 4096), 64);
+        assert_eq!(next_scan_depth(1024, 4096), 4096);
+        assert_eq!(next_scan_depth(2000, 4096), 4096); // 8000 → 클램프
+        assert_eq!(next_scan_depth(4096, 4096), 4096); // 이미 max
+        assert_eq!(next_scan_depth(3, 4), 4); // 경계: 항상 전진
+        assert_eq!(next_scan_depth(1, 1), 1);
     }
 
     #[test]
