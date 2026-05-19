@@ -85,7 +85,17 @@ impl WorkerPool {
             "follow mode started (Ctrl-C to stop)"
         );
 
+        let scan_depth = (confirmations as i64).max(64);
+
         loop {
+            // reorg 체크가 우선 — fork면 롤백 후 재인덱싱(되감긴 checkpoint).
+            // 불확실(RPC 실패/블록 부재)이면 detect_fork가 None → 무작동(안전).
+            if let Some(fork) = self.detect_fork(&provider, scan_depth).await? {
+                tracing::warn!(fork, "reorg detected — rolling back and re-indexing");
+                db::queries::rollback_from_block(&self.db_pool, fork as i64).await?;
+                continue;
+            }
+
             let head = rpc_with_retry(|| async {
                 provider
                     .get_block_number()
@@ -112,6 +122,47 @@ impl WorkerPool {
             }
         }
         Ok(())
+    }
+
+    /// 최근 로컬 블록 해시를 체인과 대조해 reorg fork point를 찾는다.
+    ///
+    /// RPC 조회 불가/블록 부재(불확실)면 `None`을 반환한다 — 파괴적 롤백의
+    /// false positive 방지(안전 규칙). 비동기 사전조회로 체인 해시 맵을 만든 뒤
+    /// 순수 [`find_fork_point`]에 주입한다(테스트성·안전규칙 보존).
+    async fn detect_fork(
+        &self,
+        provider: &impl Provider,
+        scan_depth: i64,
+    ) -> anyhow::Result<Option<u64>> {
+        let local: Vec<(u64, String)> = db::queries::recent_block_hashes(&self.db_pool, scan_depth)
+            .await?
+            .into_iter()
+            .map(|(n, h)| (n as u64, h))
+            .collect();
+        if local.is_empty() {
+            return Ok(None);
+        }
+
+        let mut chain: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+        for (height, _) in &local {
+            let h = *height;
+            let fetched = rpc_with_retry(|| async {
+                provider
+                    .get_block_by_number(BlockNumberOrTag::Number(h))
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            })
+            .await;
+            match fetched {
+                Ok(Some(block)) => {
+                    chain.insert(h, format!("0x{:x}", block.header.hash));
+                }
+                // 블록 부재(헤드 밖) 또는 RPC 실패 → 불확실: 이번 사이클 판단 보류
+                Ok(None) | Err(_) => return Ok(None),
+            }
+        }
+
+        Ok(find_fork_point(&local, |h| chain.get(&h).cloned()))
     }
 
     /// 단일 블록 청크를 처리한다.
@@ -529,9 +580,41 @@ pub fn next_target(
     }
 }
 
+/// reorg fork point를 찾는 순수 함수.
+///
+/// `local`은 (블록번호, 로컬해시)를 **번호 내림차순(tip 먼저)** 으로, 연속 구간으로
+/// 받는다. `chain_hash_at`는 현재 체인의 해당 높이 해시(`None`이면 조회 불가).
+///
+/// 반환 `Some(f)` = 높이 `f`부터(포함) 무효 → 롤백 floor. `None` = reorg 없음
+/// **또는 판단 불가**. 핵심 안전 규칙: 체인 해시가 `None`이면(RPC 불확실) 절대
+/// fork로 단정하지 않는다 — 파괴적 롤백의 false positive 방지.
+pub fn find_fork_point(
+    local: &[(u64, String)],
+    chain_hash_at: impl Fn(u64) -> Option<String>,
+) -> Option<u64> {
+    let mut fork: Option<u64> = None;
+    for (height, local_hash) in local {
+        match chain_hash_at(*height) {
+            // 불확실 → 파괴적 롤백을 거는 것보다 이번 사이클 스킵이 안전
+            None => return None,
+            Some(chain_hash) if &chain_hash == local_hash => {
+                // 일치: 이 높이 이하는 정상(체인 연결성) → 탐색 종료
+                return fork;
+            }
+            Some(_) => fork = Some(*height), // 불일치: 롤백 floor 후보(계속 하강)
+        }
+    }
+    // 윈도우를 다 봐도 불일치 → reorg가 최소 이 깊이 이상(호출자가 윈도우 확대 가능)
+    fork
+}
+
 #[cfg(test)]
 mod tests {
-    use super::next_target;
+    use super::{find_fork_point, next_target};
+
+    fn h(s: &str) -> String {
+        s.to_string()
+    }
 
     #[test]
     fn no_checkpoint_starts_at_safe_tip() {
@@ -560,5 +643,58 @@ mod tests {
     fn head_below_confirmations_saturates_to_zero() {
         assert_eq!(next_target(5, 12, None), Some((0, 0)));
         assert_eq!(next_target(5, 12, Some(0)), None);
+    }
+
+    #[test]
+    fn fork_none_when_tip_matches() {
+        let local = [(100, h("a100")), (99, h("a99"))];
+        let chain = |n: u64| Some(format!("a{n}"));
+        assert_eq!(find_fork_point(&local, chain), None);
+    }
+
+    #[test]
+    fn fork_tip_only() {
+        let local = [(100, h("old100")), (99, h("a99"))];
+        let chain = |n: u64| {
+            Some(if n == 100 {
+                h("new100")
+            } else {
+                format!("a{n}")
+            })
+        };
+        assert_eq!(find_fork_point(&local, chain), Some(100));
+    }
+
+    #[test]
+    fn fork_deeper_returns_lowest_invalid() {
+        // 100,99 reorged; 98 still matches → fork = 99
+        let local = [(100, h("o100")), (99, h("o99")), (98, h("a98"))];
+        let chain = |n: u64| {
+            Some(if n >= 99 {
+                format!("new{n}")
+            } else {
+                format!("a{n}")
+            })
+        };
+        assert_eq!(find_fork_point(&local, chain), Some(99));
+    }
+
+    #[test]
+    fn fork_whole_window_mismatch_returns_floor() {
+        let local = [(100, h("o100")), (99, h("o99"))];
+        let chain = |n: u64| Some(format!("new{n}"));
+        assert_eq!(find_fork_point(&local, chain), Some(99));
+    }
+
+    #[test]
+    fn fork_inconclusive_rpc_is_safe_none() {
+        let local = [(100, h("o100")), (99, h("o99"))];
+        // 체인 조회 불가 → 절대 롤백 단정 금지
+        assert_eq!(find_fork_point(&local, |_| None), None);
+    }
+
+    #[test]
+    fn fork_empty_local_is_none() {
+        assert_eq!(find_fork_point(&[], |_| Some(h("x"))), None);
     }
 }
