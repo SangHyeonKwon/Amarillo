@@ -781,7 +781,7 @@ pub async fn get_latest_block_number(pool: &PgPool) -> Result<Option<i64>, DbErr
 /// 최근 인덱싱된 블록의 `(번호, 해시)`를 번호 내림차순으로 최대 `limit`개 조회한다.
 ///
 /// 해시가 없는 행(S06 이전 인덱싱)은 비교 불가이므로 제외한다.
-/// reorg 감지(`find_fork_point`)의 로컬 입력용.
+/// reorg 감지(`detect_fork` → 순수 `classify_fork`)의 로컬 입력용.
 #[tracing::instrument(skip(pool))]
 pub async fn recent_block_hashes(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String)>, DbError> {
     let rows: Vec<(i64, String)> = sqlx::query_as(

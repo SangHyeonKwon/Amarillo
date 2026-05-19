@@ -76,7 +76,7 @@ By default each cycle is woken by `sleep(--poll-interval-secs)`. With
 longer bounded by the poll interval. **Only the trigger changes**: the
 reorg check, `next_target`, and `index_range` are byte-for-byte identical.
 
-Pure/testable split (same philosophy as `next_target`/`find_fork_point`):
+Pure/testable split (same philosophy as `next_target`/`classify_fork`):
 `resolve_trigger_mode(subscribe, ws_url)` decides Polling vs Subscribe
 (trims the URL; blank ⇒ Polling) and is unit-tested without WS/RPC. The
 live WS task is compile + clippy checked and manually smoked.
