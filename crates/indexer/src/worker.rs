@@ -69,6 +69,51 @@ impl WorkerPool {
         Ok(())
     }
 
+    /// 체인 헤드를 따라가며 연속 인덱싱한다.
+    ///
+    /// `head - confirmations`까지만 인덱싱(얕은 reorg 완화, D009).
+    /// `ctrl_c` 수신 시 진행 중 작업을 마치고 graceful 종료한다.
+    pub async fn follow(&self, confirmations: u64, poll: Duration) -> anyhow::Result<()> {
+        let provider = ProviderBuilder::new().connect_http(
+            self.rpc_url
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid RPC URL: {e}"))?,
+        );
+        tracing::info!(
+            confirmations,
+            poll_secs = poll.as_secs(),
+            "follow mode started (Ctrl-C to stop)"
+        );
+
+        loop {
+            let head = rpc_with_retry(|| async {
+                provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            })
+            .await?;
+
+            let checkpoint = db::queries::get_last_checkpoint(&self.db_pool, 1).await?;
+            match next_target(head, confirmations, checkpoint) {
+                Some((from, to)) => {
+                    tracing::info!(head, from, to, "following: indexing new range");
+                    self.index_range(from, to).await?;
+                }
+                None => tracing::debug!(head, "following: no new confirmed blocks"),
+            }
+
+            tokio::select! {
+                _ = tokio::time::sleep(poll) => {}
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Ctrl-C received — stopping follow loop");
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// 단일 블록 청크를 처리한다.
     #[tracing::instrument(skip(self))]
     async fn process_chunk(&self, from: u64, to: u64) -> anyhow::Result<()> {
@@ -458,4 +503,60 @@ where
         f().await.map_err(backoff::Error::transient)
     })
     .await
+}
+
+/// follow 루프의 순수 결정 함수 — 다음에 인덱싱할 블록 범위.
+///
+/// `safe = head - confirmations` (얕은 reorg 완화, D009). 체크포인트가 있으면
+/// 그 다음 블록부터, 없으면 tip(`safe`)부터 시작한다(follow는 전체 백필을 하지
+/// 않는다). 새로 인덱싱할 확정 블록이 없으면 `None`.
+pub fn next_target(
+    head: u64,
+    confirmations: u64,
+    last_checkpoint: Option<i64>,
+) -> Option<(u64, u64)> {
+    let safe = head.saturating_sub(confirmations);
+    let resume = match last_checkpoint {
+        Some(c) => (c.max(0) as u64).saturating_add(1),
+        None => safe,
+    };
+    if resume > safe {
+        None
+    } else {
+        Some((resume, safe))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_target;
+
+    #[test]
+    fn no_checkpoint_starts_at_safe_tip() {
+        // 백필 방지: 체크포인트 없으면 tip(head-conf)부터
+        assert_eq!(next_target(100, 12, None), Some((88, 88)));
+    }
+
+    #[test]
+    fn resumes_from_checkpoint_plus_one() {
+        assert_eq!(next_target(100, 12, Some(50)), Some((51, 88)));
+    }
+
+    #[test]
+    fn nothing_new_when_caught_up() {
+        // 체크포인트가 이미 safe head에 도달 → None
+        assert_eq!(next_target(100, 12, Some(88)), None);
+        assert_eq!(next_target(100, 12, Some(200)), None);
+    }
+
+    #[test]
+    fn boundary_one_block_behind() {
+        assert_eq!(next_target(100, 12, Some(87)), Some((88, 88)));
+    }
+
+    #[test]
+    fn head_below_confirmations_saturates_to_zero() {
+        assert_eq!(next_target(5, 12, None), Some((0, 0)));
+        assert_eq!(next_target(5, 12, Some(0)), None);
+    }
 }

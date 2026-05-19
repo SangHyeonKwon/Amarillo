@@ -16,6 +16,12 @@ pub struct Config {
     pub from_block: u64,
     /// 종료 블록 번호 (None이면 최신 블록까지)
     pub to_block: Option<u64>,
+    /// 헤드 추종 모드 (true면 고정 범위 대신 체인 헤드를 따라감)
+    pub follow: bool,
+    /// follow 폴링 간격 (초)
+    pub poll_interval_secs: u64,
+    /// 확인 지연: head - N 까지만 인덱싱 (얕은 reorg 완화, D009)
+    pub confirmations: u64,
     /// 동시 처리할 최대 블록 수
     pub max_concurrent_blocks: usize,
     /// 배치 INSERT 크기
@@ -52,6 +58,9 @@ impl Config {
             ws_url,
             from_block: 0,
             to_block: None,
+            follow: false,
+            poll_interval_secs: 12,
+            confirmations: 12,
             max_concurrent_blocks,
             batch_size,
             max_db_connections: env::var("MAX_DB_CONNECTIONS")
@@ -65,6 +74,19 @@ impl Config {
     pub fn with_block_range(mut self, from: u64, to: Option<u64>) -> Self {
         self.from_block = from;
         self.to_block = to;
+        self
+    }
+
+    /// CLI의 follow 옵션을 반영한다.
+    pub fn with_follow_opts(
+        mut self,
+        follow: bool,
+        poll_interval_secs: u64,
+        confirmations: u64,
+    ) -> Self {
+        self.follow = follow;
+        self.poll_interval_secs = poll_interval_secs;
+        self.confirmations = confirmations;
         self
     }
 }

@@ -5,6 +5,7 @@
 //! ## 사용법
 //! ```bash
 //! cargo run -p indexer -- --from-block 18000000 --to-block 18001000
+//! cargo run -p indexer -- --follow            # 체인 헤드 추종 (S05)
 //! ```
 
 mod config;
@@ -23,13 +24,25 @@ use crate::worker::WorkerPool;
 #[derive(Parser)]
 #[command(name = "indexer", version, about)]
 struct Cli {
-    /// Start block number (inclusive)
+    /// Start block number (inclusive). Required unless --follow.
     #[arg(long)]
-    from_block: u64,
+    from_block: Option<u64>,
 
-    /// End block number (inclusive, defaults to from_block)
+    /// End block number (inclusive). Ignored with --follow.
     #[arg(long)]
     to_block: Option<u64>,
+
+    /// Continuously follow the chain head instead of a fixed range.
+    #[arg(long)]
+    follow: bool,
+
+    /// Poll interval in seconds while following (default 12).
+    #[arg(long, default_value_t = 12)]
+    poll_interval_secs: u64,
+
+    /// Confirmation lag: index only up to head - N (default 12).
+    #[arg(long, default_value_t = 12)]
+    confirmations: u64,
 }
 
 #[tokio::main]
@@ -43,13 +56,35 @@ async fn main() -> anyhow::Result<()> {
 
     // CLI + 환경변수 설정 로드
     let cli = Cli::parse();
-    let config = Config::from_env()?.with_block_range(cli.from_block, cli.to_block);
+    if !cli.follow && cli.from_block.is_none() {
+        anyhow::bail!("--from-block is required unless --follow is set");
+    }
+    let config = Config::from_env()?
+        .with_block_range(cli.from_block.unwrap_or(0), cli.to_block)
+        .with_follow_opts(cli.follow, cli.poll_interval_secs, cli.confirmations);
     tracing::info!(?config, "configuration loaded");
 
     // DB 연결 + 마이그레이션
     let db_pool = db::create_pool(&config.database_url, config.max_db_connections).await?;
     db::run_migrations(&db_pool).await?;
     tracing::info!("database connected and migrations applied");
+
+    if config.follow {
+        let worker_pool = WorkerPool::new(
+            db_pool,
+            config.rpc_url.clone(),
+            config.max_concurrent_blocks,
+            config.batch_size,
+        );
+        worker_pool
+            .follow(
+                config.confirmations,
+                std::time::Duration::from_secs(config.poll_interval_secs),
+            )
+            .await?;
+        tracing::info!("indexer (follow) stopped");
+        return Ok(());
+    }
 
     // 체크포인트에서 재개 지점 결정
     let from_block = match db::queries::get_last_checkpoint(&db_pool, 1).await? {
