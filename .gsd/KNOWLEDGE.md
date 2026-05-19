@@ -80,3 +80,15 @@ GSD-2: Rules(불변) + Patterns/Lessons(누적). 실행 전 반드시 읽는다.
   "다음에 뭘 할지" 판단을 순수 함수(`next_target(head,conf,checkpoint)`)로 떼어내 RPC/DB
   없이 단위테스트. 환경 의존 부분(폴링·sleep·signal)은 얇은 드라이버로. graceful 종료는
   `tokio::select!{ sleep, ctrl_c }`. 신규 루프/데몬은 이 분리 준수.
+- **[S06-T03 사고/Rule] 파괴적 테스트 픽스처는 시드와 *증명 가능하게* 분리하라**:
+  `rollback_from_block(f)`는 `block_number >= f`를 삭제. 픽스처 `FORK`를 "큰 수"라
+  여겨 `9_999_000`으로 잡았으나 시드 최대(~18,000,002)보다 작아 **공유 dev DB의
+  시드 전체가 삭제**됨 → `docker compose run --rm seed`로 복구. 규칙: 범위/`>=`
+  의미의 파괴 연산 픽스처는 실제 시드 상한보다 확실히 위(`99_000_000`)로, 근거를
+  주석에 명시. 공유 DB 대상 파괴 테스트는 손상 위험이 실재 → 안전 범위 + 명시
+  복구 기본. "큰 수"는 "분리"가 아니다 — 실제 경계와 비교해 검증.
+- **[S06-T04] async 사전조회 → 순수 sync 결정함수 (Pattern)**: 순수 판정 함수가
+  비동기 IO를 필요로 하면, IO를 *먼저* 비동기로 수행해 맵/스냅샷을 만들고 그걸
+  동기 클로저로 순수 함수에 주입한다(`detect_fork`가 체인 해시를 prefetch →
+  `find_fork_point(local, |h| map.get(h))`). 순수 함수의 테스트성·결정성 보존.
+  파괴적 작업은 **불확실(IO 실패)이면 무작동**을 기본값으로(rollback false positive 방지).

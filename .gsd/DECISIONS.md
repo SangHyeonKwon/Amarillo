@@ -66,3 +66,13 @@
   S06/S07 합산으로 충족. 단순/안전 우선.
 - **검증 제약**: 실시간 follow는 `RPC_URL` 필요(CI/환경 부재 가능) → 순수 결정 로직
   `next_target()`를 분리해 단위테스트(RPC 불요), 라이브 follow는 수동 스모크·문서.
+
+## D010 — reorg: 해시 저장 + 폴링마다 scan-window fork 체크, 깊은 reorg는 보수적
+- **결정**: ① `block`에 `block_hash`/`parent_hash` 저장(첫 마이그레이션, S06-T01).
+  ② follow 폴링마다 최근 `max(confirmations,64)` 블록을 체인과 대조(`find_fork_point`)
+  → fork면 `rollback_from_block` 후 재인덱싱. ③ scan window보다 깊은 reorg는
+  최소 공통조상이 아니라 **floor(윈도우 최저)** 로 보수적 롤백.
+- **이유**: 해시 없이는 reorg 비교 불가. 폴링형이라 매 사이클 체크가 단순·안전.
+  보수적 롤백은 정확성 우선(과삭제 후 재인덱싱 = 안전, 과소삭제 = 데이터 오염).
+- **트레이드오프**: 매 폴링 N RPC 추가비용(얕은 윈도우라 수용). 윈도우 동적 확대·
+  최소 롤백 정밀화는 S07. **안전 규칙**: 체인 해시 불확실 시 절대 롤백 안 함.
