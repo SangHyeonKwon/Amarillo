@@ -113,6 +113,10 @@ pub struct Block {
     pub timestamp: DateTime<Utc>,
     /// 블록에서 사용된 총 가스
     pub gas_used: i64,
+    /// 블록 해시 (reorg 감지용; S06 이전 행은 NULL)
+    pub block_hash: Option<String>,
+    /// 부모 블록 해시 (fork point 탐지용; S06 이전 행은 NULL)
+    pub parent_hash: Option<String>,
 }
 
 /// ERC-20 토큰 메타데이터.

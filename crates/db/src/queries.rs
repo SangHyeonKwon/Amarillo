@@ -50,15 +50,20 @@ pub async fn insert_blocks(pool: &PgPool, blocks: &[Block]) -> Result<u64, DbErr
     let block_numbers: Vec<i64> = blocks.iter().map(|b| b.block_number).collect();
     let timestamps: Vec<DateTime<Utc>> = blocks.iter().map(|b| b.timestamp).collect();
     let gas_useds: Vec<i64> = blocks.iter().map(|b| b.gas_used).collect();
+    let block_hashes: Vec<Option<&str>> = blocks.iter().map(|b| b.block_hash.as_deref()).collect();
+    let parent_hashes: Vec<Option<&str>> =
+        blocks.iter().map(|b| b.parent_hash.as_deref()).collect();
 
     let result = sqlx::query(
-        "INSERT INTO block (block_number, timestamp, gas_used)
-         SELECT * FROM UNNEST($1::BIGINT[], $2::TIMESTAMPTZ[], $3::BIGINT[])
+        "INSERT INTO block (block_number, timestamp, gas_used, block_hash, parent_hash)
+         SELECT * FROM UNNEST($1::BIGINT[], $2::TIMESTAMPTZ[], $3::BIGINT[], $4::TEXT[], $5::TEXT[])
          ON CONFLICT (block_number) DO NOTHING",
     )
     .bind(&block_numbers)
     .bind(&timestamps)
     .bind(&gas_useds)
+    .bind(&block_hashes)
+    .bind(&parent_hashes)
     .execute(pool)
     .await?;
 

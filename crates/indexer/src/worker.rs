@@ -184,6 +184,8 @@ impl WorkerPool {
             block_number: block_number as i64,
             timestamp,
             gas_used: block.header.gas_used as i64,
+            block_hash: Some(format!("0x{:x}", block.header.hash)),
+            parent_hash: Some(format!("0x{:x}", block.header.parent_hash)),
         };
         db::queries::insert_blocks(db_pool, &[block_model]).await?;
 
