@@ -104,3 +104,22 @@
 - **검증 제약(D009/D010과 동일)**: 라이브 WS는 `WS_URL` 필요(환경 미보장) → 순수
   `resolve_trigger_mode(subscribe, ws_url)→모드`만 단위테스트, 실제 구독·폴백은
   컴파일+clippy+수동 스모크·문서.
+
+## D012 — M003 알림: outbox 디스패처 + SSRF/서명, indexer 서브모드 (S08)
+- **결정**: ① 알림 전송은 **outbox/디스패처** 패턴 — follow 루프에 인라인 금지.
+  실패 격리: 느리거나 깨진 webhook이 인덱싱·reorg 정정을 막아선 안 됨. 신규 실패는
+  이미 DB에 적재(M002) → 디스패처가 매칭·미전송분을 스캔해 전송. ② 디스패처는
+  신규 크레이트 아닌 **`indexer` 바이너리 서브모드**(`--dispatch-alerts`) — follow의
+  순수+드라이버/graceful 패턴 재사용("재작성 금지·추가로 빌드", PROJECT 스코프).
+  ③ `webhook_url`은 신뢰불가 입력 → **SSRF 가드**(https-only, loopback/RFC1918/
+  link-local/메타데이터 거부, 리다이렉트 비추적) + per-sub **HMAC-SHA256 서명**
+  (시크릿 DB 저장·**로그 미출력**). ④ 신규 의존성 `reqwest`(rustls, 최소 피처)
+  1개 수용 — 아웃바운드 HTTP는 본질적 신규 능력(S07 T01/T02 무의존과 별개,
+  정직 표기). ⑤ MVP = **건별 정확매칭**(category/to_addr) 전송; 임계·율(급증)
+  집계는 백로그.
+- **이유**: 실패 격리·멱등(`alert_delivery` anti-join)·재시작 안전·테스트성
+  (순수 매칭/가드/서명 + 얇은 비동기 드라이버 = D009 철학 일관). SSRF/서명은
+  외부로 나가는 신뢰불가 URL에 대한 필수 안전장치.
+- **검증 제약(D009~D011과 동일)**: 라이브 전송은 수신 엔드포인트 필요(CI 미보장)
+  → 순수 SSRF 가드·HMAC 서명·매칭 술어 단위테스트 + 매칭 쿼리 통합테스트(PG)가
+  1차 증빙, 실제 POST·재시도는 컴파일+clippy+수동 스모크·문서.

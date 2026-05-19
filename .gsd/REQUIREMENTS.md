@@ -29,11 +29,25 @@ GSD-2: "shippable"의 정의와 수용 기준. Milestone마다 무엇이 되면 
 - 인덱서가 체인 헤드를 따라가며 신규 블록 실패를 자동 분류·저장 (연속 루프)
 - reorg 발생 시 영향 블록 데이터 정정, 멱등성 유지, 중복/유령 행 없음
 
-## M003 — Actionable Alerts (출하 정의) `[sketch]`
+## M003 — Actionable Alerts (출하 정의)
 
 > "실패 패턴 구독 → 웹훅으로 푸시. 온체인 × 비공개 데이터 조인 예시 1건."
 
-(상세는 M001/M002 완료 후 Reassess에서 확정)
+M001·M002 출하로 확정(Reassess). M003 = **S08(구독+웹훅) + S09(조인 예시)**.
+
+**S08 — 실패 패턴 구독 + 웹훅 전송** 수용 기준 (mechanically checkable):
+- `POST /v1/alert-subscriptions {webhook_url, error_category?, to_addr?}` → 생성.
+  안전하지 않은 `webhook_url`(비-https / loopback / RFC1918 / link-local /
+  메타데이터 IP)은 **400**. `GET /v1/alert-subscriptions`, `DELETE /{id}` 동작.
+  기존 `ApiResponse`/에러 규약 준수.
+- 디스패처가 신규 매칭 실패 tx에 대해 구독 `webhook_url`로 **HMAC-SHA256 서명된**
+  POST를 **정확히 1회**(멱등 — `alert_delivery`) 전송. 전송 실패는 재시도·기록.
+- 마이그레이션 멱등, 신규 public `///`, SSRF 가드·서명·매칭 단위테스트 +
+  매칭 쿼리 통합테스트 + `scripts/verify-alerts.sh` 재현 스크립트/문서.
+
+**S09 — 온체인 × 비공개 데이터 조인 예시** `[sketch]`: 실패 인텔리전스 × 비공개
+(시드/오프체인 라벨 등) 조인 1건. 가장 방어 가능한 해자 — 소비 유스케이스
+확정 후 S08 출하 시점에 정제(별도 슬라이스). **M003 출하 = S08 ∧ S09.**
 
 ## 공통 비기능 요건
 
