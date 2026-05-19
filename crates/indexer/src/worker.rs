@@ -86,13 +86,25 @@ impl WorkerPool {
         );
 
         let scan_depth = (confirmations as i64).max(64);
+        let mut m = FollowMetrics::default();
 
         loop {
+            m.cycle += 1;
+
             // reorg 체크가 우선 — fork면 롤백 후 재인덱싱(되감긴 checkpoint).
             // 불확실(RPC 실패/블록 부재)이면 detect_fork가 None → 무작동(안전).
             if let Some(fork) = self.detect_fork(&provider, scan_depth).await? {
-                tracing::warn!(fork, "reorg detected — rolling back and re-indexing");
-                db::queries::rollback_from_block(&self.db_pool, fork as i64).await?;
+                tracing::warn!(cycle = m.cycle, fork, "reorg detected — rolling back");
+                let rolled = db::queries::rollback_from_block(&self.db_pool, fork as i64).await?;
+                m.reorgs += 1;
+                m.last_reorg_depth = rolled;
+                tracing::warn!(
+                    cycle = m.cycle,
+                    fork,
+                    depth = rolled,
+                    reorgs_total = m.reorgs,
+                    "rolled back — re-indexing next cycle"
+                );
                 continue;
             }
 
@@ -105,13 +117,35 @@ impl WorkerPool {
             .await?;
 
             let checkpoint = db::queries::get_last_checkpoint(&self.db_pool, 1).await?;
+            let mut indexed_this_cycle = 0u64;
             match next_target(head, confirmations, checkpoint) {
                 Some((from, to)) => {
                     tracing::info!(head, from, to, "following: indexing new range");
                     self.index_range(from, to).await?;
+                    indexed_this_cycle = (to - from) + 1;
+                    m.blocks_indexed += indexed_this_cycle;
                 }
                 None => tracing::debug!(head, "following: no new confirmed blocks"),
             }
+
+            // 사이클당 구조화 관측 1줄: lag·처리량·reorg·마지막 폴 시각.
+            // (관측 전용 — 분기/타이밍/IO 불변)
+            let now = chrono::Utc::now();
+            let lag = checkpoint
+                .map(|c| head.saturating_sub(c.max(0) as u64))
+                .unwrap_or(0);
+            tracing::info!(
+                cycle = m.cycle,
+                head,
+                checkpoint = checkpoint.unwrap_or(-1),
+                lag,
+                indexed_this_cycle,
+                blocks_total = m.blocks_indexed,
+                reorgs_total = m.reorgs,
+                last_reorg_depth = m.last_reorg_depth,
+                last_poll = %now,
+                "follow cycle summary"
+            );
 
             tokio::select! {
                 _ = tokio::time::sleep(poll) => {}
@@ -556,6 +590,22 @@ where
         f().await.map_err(backoff::Error::transient)
     })
     .await
+}
+
+/// follow 루프의 누적 관측 카운터.
+///
+/// 경량(프로세스 메모리)·신규 의존성 없음 — 값은 `tracing` 필드로만 방출한다.
+/// 동작/타이밍/IO에 영향 없음(관측 전용).
+#[derive(Default)]
+struct FollowMetrics {
+    /// 루프 반복 횟수(1부터)
+    cycle: u64,
+    /// 누적 인덱싱 블록 수
+    blocks_indexed: u64,
+    /// 누적 reorg 발생 횟수
+    reorgs: u64,
+    /// 최근 reorg에서 롤백된 블록 수(깊이). 발생 전이면 0
+    last_reorg_depth: u64,
 }
 
 /// follow 루프의 순수 결정 함수 — 다음에 인덱싱할 블록 범위.
