@@ -778,6 +778,98 @@ pub async fn get_latest_block_number(pool: &PgPool) -> Result<Option<i64>, DbErr
     Ok(row.map(|r| r.0))
 }
 
+/// 최근 인덱싱된 블록의 `(번호, 해시)`를 번호 내림차순으로 최대 `limit`개 조회한다.
+///
+/// 해시가 없는 행(S06 이전 인덱싱)은 비교 불가이므로 제외한다.
+/// reorg 감지(`find_fork_point`)의 로컬 입력용.
+#[tracing::instrument(skip(pool))]
+pub async fn recent_block_hashes(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String)>, DbError> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT block_number, block_hash
+         FROM block
+         WHERE block_hash IS NOT NULL
+         ORDER BY block_number DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// reorg 정정: `from_block`부터(포함) 인덱싱 데이터를 모두 삭제하고 체크포인트를
+/// 되감는다. 단일 트랜잭션·멱등.
+///
+/// tx_hash FK가 `ON DELETE CASCADE`가 아니므로 의존 행 → `transaction` → `block`
+/// 순서로 삭제한다. `price_snapshot`/`user_profile`은 블록 스코프가 아니라 제외.
+/// 재인덱싱은 하지 않는다(follow가 체크포인트에서 재개). 삭제된 block 수를 반환.
+#[tracing::instrument(skip(pool))]
+pub async fn rollback_from_block(pool: &PgPool, from_block: i64) -> Result<u64, DbError> {
+    let resume = (from_block - 1).max(0);
+    let mut tx = pool.begin().await?;
+
+    // 1) tx_hash 의존 행 (transaction 삭제 전 — FK RESTRICT)
+    sqlx::query(
+        "DELETE FROM swap_event
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM liquidity_event
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM token_transfer
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM trace_log
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM failed_transaction
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+
+    // 2) transaction → block
+    sqlx::query("DELETE FROM transaction WHERE block_number >= $1")
+        .bind(from_block)
+        .execute(&mut *tx)
+        .await?;
+    let blocks = sqlx::query("DELETE FROM block WHERE block_number >= $1")
+        .bind(from_block)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // 3) 체크포인트 되감기 (follow가 from_block부터 재인덱싱)
+    sqlx::query(
+        "UPDATE indexer_checkpoint
+         SET last_processed_block = $1, updated_at = NOW()
+         WHERE chain_id = 1",
+    )
+    .bind(resume)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(blocks)
+}
+
 /// 특정 블록의 스왑 이벤트를 조회한다.
 #[tracing::instrument(skip(pool))]
 pub async fn get_swap_events_by_block(

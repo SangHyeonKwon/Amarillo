@@ -21,3 +21,4 @@ tokio.workspace = true
 # deps above, so the runtime + time types must be declared here too.
 tokio = { workspace = true }
 chrono = { workspace = true }
+bigdecimal = { workspace = true }
