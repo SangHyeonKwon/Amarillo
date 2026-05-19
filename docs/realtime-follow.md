@@ -89,34 +89,39 @@ secret); only the mode label (`polling`/`subscribe`) appears.
 ## Reorg detection & correction (S06)
 
 Every poll, *before* indexing, the loop compares the most recent local block
-hashes against the chain (`detect_fork` → pure `find_fork_point`). On a
-mismatch it calls `rollback_from_block(fork)` — deletes `>= fork` across
-block/tx/events/trace/failed in one transaction and rewinds the checkpoint —
-then re-indexes on the next iteration.
+hashes against the chain (`detect_fork`, driving the pure `classify_fork` /
+`next_scan_depth`). On a mismatch it calls `rollback_from_block(fork)` —
+deletes `>= fork` across block/tx/events/trace/failed in one transaction and
+rewinds the checkpoint — then re-indexes on the next iteration.
 
 - **Safety**: if any chain hash is unavailable (RPC error / block absent) the
   check yields *no fork* — never a destructive rollback on uncertain data.
-- **Scan window** = `max(--confirmations, 64)` blocks. A reorg **deeper than
-  the window is _not_ fully corrected**: the whole window mismatches,
-  `find_fork_point` returns the window floor, and `rollback_from_block` only
-  deletes `>= floor` — older blocks below the window that belong to the
-  abandoned chain are **kept** (under-deletion → potential silent
-  inconsistency). This is *not* a conservative over-delete. Correctness relies
-  on the unstated assumption *reorg depth ≤ scan window*; on mainnet that holds
-  in practice (PoS finality ≈ 64 blocks ≤ window, plus the confirmations lag),
-  so practical risk is low — but it is **not unconditionally "safe"**. Dynamic
-  window widening to the true common ancestor is S07-T03.
+- **Lazy + dynamic widening (S07-T03, resolves review R1/R2)**: the scan
+  starts at the tip and fetches chain hashes **on demand**, tip → down. No
+  reorg ⇒ the tip hash matches ⇒ **1 RPC** and stop (R2: the old code
+  prefetched the whole window every poll). On a mismatch it descends, and if
+  the whole loaded range still mismatches it **widens ×4 up to
+  `REORG_SCAN_CAP` (4096 blocks)** until it finds the *true* minimum common
+  ancestor, then rolls back from exactly there. This **eliminates the earlier
+  under-deletion gap** (a reorg deeper than a fixed 64-window used to leave
+  stale pre-window blocks). Residual: only a reorg **deeper than 4096 blocks**
+  (~64× mainnet PoS finality — effectively impossible) falls back to a
+  best-effort floor rollback; that bound is now explicit, not an unstated
+  "safe" assumption.
 
 ## Limits / scope (see `.gsd/DECISIONS.md` D009, D010)
 
 - Polling **by default**; `eth_subscribe` (`newHeads`) is opt-in via
   `--subscribe` + `WS_URL`, with automatic polling fallback (S07-T02, D011).
-- Reorgs **within** the scan window are detected & corrected exactly (S06).
-  Reorgs **deeper than** the window are under-corrected (stale pre-window
-  blocks retained → potential silent inconsistency) — low practical risk on
-  mainnet given PoS finality, full fix is S07-T03. An earlier draft of this
-  doc/D010/S06-SUMMARY mislabeled this as a safe "conservative over-delete";
-  corrected 2026-05-20 (review R1).
+- Reorgs up to `REORG_SCAN_CAP` (4096 blocks) are corrected to the **exact**
+  minimum common ancestor (S07-T03). Only a deeper-than-4096 reorg
+  (~64× mainnet finality) is a best-effort floor rollback — the bound is now
+  explicit. (An earlier draft of this doc / D010 / S06-SUMMARY mislabeled the
+  old 64-window behavior as a safe "conservative over-delete"; that was a
+  review-R1 honesty fix, and S07-T03 then removed the gap itself.)
+- R3/R4 (per-iteration range cap; Ctrl-C responsiveness *inside*
+  `index_range`) remain S07 backlog — hardening refinements, not correctness
+  gaps (see `.gsd/S07-PLAN.md`).
 
 ## Verification
 
@@ -124,7 +129,7 @@ The follow loop needs a live `RPC_URL`, which CI may not have. So the
 **decision logic is verified without RPC**:
 
 ```bash
-cargo test -p indexer        # next_target + find_fork_point + resolve_trigger_mode (no RPC/DB/WS)
+cargo test -p indexer        # next_target + classify_fork + next_scan_depth + resolve_trigger_mode (no RPC/DB/WS)
 cargo test -p db -- --ignored # rollback_from_block idempotency (needs Postgres)
 ```
 
