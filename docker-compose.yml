@@ -31,6 +31,21 @@ services:
       postgres:
         condition: service_healthy
 
+  # ── Web Dashboard (static SPA via nginx) ──────────────────────
+  web:
+    build:
+      context: ./web
+      args:
+        # Baked into the bundle at build time. The dashboard runs in the
+        # browser, so this must be the host-reachable API URL, not "api".
+        VITE_API_BASE_URL: http://localhost:3000
+        # Optional subpath deploy support; "/" for root.
+        VITE_APP_BASE_PATH: /
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+
   # ── Seed (demo data, run manually) ────────────────────────────
   seed:
     image: postgres:16-alpine
