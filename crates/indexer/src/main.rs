@@ -15,7 +15,7 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::Config;
-use crate::worker::WorkerPool;
+use crate::worker::{resolve_trigger_mode, WorkerPool};
 
 /// Uniswap V3 DeFi transaction indexer.
 ///
@@ -43,6 +43,11 @@ struct Cli {
     /// Confirmation lag: index only up to head - N (default 12).
     #[arg(long, default_value_t = 12)]
     confirmations: u64,
+
+    /// Drive follow cycles by a newHeads subscription instead of polling.
+    /// Requires WS_URL; falls back to polling if unavailable (D011).
+    #[arg(long)]
+    subscribe: bool,
 }
 
 #[tokio::main]
@@ -61,7 +66,12 @@ async fn main() -> anyhow::Result<()> {
     }
     let config = Config::from_env()?
         .with_block_range(cli.from_block.unwrap_or(0), cli.to_block)
-        .with_follow_opts(cli.follow, cli.poll_interval_secs, cli.confirmations);
+        .with_follow_opts(
+            cli.follow,
+            cli.poll_interval_secs,
+            cli.confirmations,
+            cli.subscribe,
+        );
     tracing::info!(?config, "configuration loaded");
 
     // DB 연결 + 마이그레이션
@@ -76,10 +86,12 @@ async fn main() -> anyhow::Result<()> {
             config.max_concurrent_blocks,
             config.batch_size,
         );
+        let trigger = resolve_trigger_mode(config.subscribe, config.ws_url.as_deref());
         worker_pool
             .follow(
                 config.confirmations,
                 std::time::Duration::from_secs(config.poll_interval_secs),
+                trigger,
             )
             .await?;
         tracing::info!("indexer (follow) stopped");

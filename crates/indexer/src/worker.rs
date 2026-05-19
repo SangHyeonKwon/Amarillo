@@ -6,7 +6,7 @@ use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::TransactionResponse;
 use alloy::providers::ext::DebugApi;
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::rpc::types::trace::geth::{GethDebugTracingOptions, GethTrace};
 use backoff::ExponentialBackoffBuilder;
 use bigdecimal::BigDecimal;
@@ -73,7 +73,12 @@ impl WorkerPool {
     ///
     /// `head - confirmations`까지만 인덱싱(얕은 reorg 완화, D009).
     /// `ctrl_c` 수신 시 진행 중 작업을 마치고 graceful 종료한다.
-    pub async fn follow(&self, confirmations: u64, poll: Duration) -> anyhow::Result<()> {
+    pub async fn follow(
+        &self,
+        confirmations: u64,
+        poll: Duration,
+        trigger: TriggerMode,
+    ) -> anyhow::Result<()> {
         let provider = ProviderBuilder::new().connect_http(
             self.rpc_url
                 .parse()
@@ -82,11 +87,19 @@ impl WorkerPool {
         tracing::info!(
             confirmations,
             poll_secs = poll.as_secs(),
+            trigger = trigger.label(),
             "follow mode started (Ctrl-C to stop)"
         );
 
         let scan_depth = (confirmations as i64).max(64);
         let mut m = FollowMetrics::default();
+
+        // 트리거: 구독 모드면 newHeads 틱 채널을 띄운다. 연결/구독 실패나
+        // 스트림 종료 시 채널이 닫혀 자동으로 폴링으로 폴백한다(무회귀, D011).
+        let mut ws_rx = match &trigger {
+            TriggerMode::Subscribe(ws_url) => Some(spawn_head_ticks(ws_url.clone())),
+            TriggerMode::Polling => None,
+        };
 
         loop {
             m.cycle += 1;
@@ -147,12 +160,38 @@ impl WorkerPool {
                 "follow cycle summary"
             );
 
-            tokio::select! {
-                _ = tokio::time::sleep(poll) => {}
-                _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Ctrl-C received — stopping follow loop");
-                    break;
+            // 다음 사이클 트리거: 구독이면 newHeads 틱, 아니면 sleep(poll).
+            // ctrl_c는 항상 레이스(graceful 종료). 채널이 닫히면 폴링 폴백.
+            let mut fall_back = false;
+            match ws_rx.as_mut() {
+                Some(rx) => {
+                    tokio::select! {
+                        tick = rx.recv() => {
+                            if tick.is_none() {
+                                tracing::warn!(
+                                    "newHeads channel closed — falling back to polling"
+                                );
+                                fall_back = true;
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Ctrl-C received — stopping follow loop");
+                            break;
+                        }
+                    }
                 }
+                None => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(poll) => {}
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Ctrl-C received — stopping follow loop");
+                            break;
+                        }
+                    }
+                }
+            }
+            if fall_back {
+                ws_rx = None;
             }
         }
         Ok(())
@@ -658,9 +697,86 @@ pub fn find_fork_point(
     fork
 }
 
+/// follow 사이클을 무엇이 깨우는지(트리거)를 나타낸다.
+///
+/// 폴링이 기본, 구독은 옵트인(D011). `Subscribe`는 (트림된) WS URL을 담는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerMode {
+    /// `sleep(poll)`로 사이클을 깨운다(기본, 호환성 안전값).
+    Polling,
+    /// newHeads 구독으로 사이클을 깨운다. 내부 문자열 = WS 엔드포인트.
+    Subscribe(String),
+}
+
+impl TriggerMode {
+    /// 로그용 모드 라벨. **WS URL(시크릿 가능)은 절대 노출하지 않는다.**
+    pub fn label(&self) -> &'static str {
+        match self {
+            TriggerMode::Polling => "polling",
+            TriggerMode::Subscribe(_) => "subscribe",
+        }
+    }
+}
+
+/// `--subscribe`와 `WS_URL`에서 트리거 모드를 결정하는 순수 함수.
+///
+/// 구독을 요청(`subscribe=true`)했고 `ws_url`이 공백이 아닐 때만
+/// `Subscribe(트림된 URL)`. 그 외엔 `Polling`으로 **폴백**한다 — WS 미지정/공백은
+/// 회귀가 아니라 정상 기본값(D011). RPC/WS 없이 단위테스트 가능.
+pub fn resolve_trigger_mode(subscribe: bool, ws_url: Option<&str>) -> TriggerMode {
+    match (subscribe, ws_url.map(str::trim)) {
+        (true, Some(u)) if !u.is_empty() => TriggerMode::Subscribe(u.to_string()),
+        _ => TriggerMode::Polling,
+    }
+}
+
+/// newHeads 구독을 백그라운드에서 돌리며 새 헤드마다 사이클 틱을 보낸다.
+///
+/// WS 연결/구독 실패나 스트림 종료 시 태스크가 끝나 채널이 닫히고, 호출자는
+/// 자동으로 폴링으로 폴백한다(무회귀, D011). 연결을 수명 동안 살리기 위해
+/// provider를 이 태스크가 소유한다. **WS URL은 로그에 찍지 않는다(시크릿 가능).**
+fn spawn_head_ticks(ws_url: String) -> tokio::sync::mpsc::Receiver<()> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        let provider = match ProviderBuilder::new()
+            .connect_ws(WsConnect::new(ws_url))
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "WS connect failed — falling back to polling");
+                return;
+            }
+        };
+        let mut sub = match provider.subscribe_blocks().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "newHeads subscribe failed — falling back to polling");
+                return;
+            }
+        };
+        tracing::info!("subscribe mode: newHeads subscription active");
+        loop {
+            match sub.recv().await {
+                Ok(_) => {
+                    // 수신자(follow 루프) 종료 시 send 실패 → 태스크 정리
+                    if tx.send(()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "newHeads stream ended — falling back to polling");
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{find_fork_point, next_target};
+    use super::{find_fork_point, next_target, resolve_trigger_mode, TriggerMode};
 
     fn h(s: &str) -> String {
         s.to_string()
@@ -746,5 +862,56 @@ mod tests {
     #[test]
     fn fork_empty_local_is_none() {
         assert_eq!(find_fork_point(&[], |_| Some(h("x"))), None);
+    }
+
+    #[test]
+    fn trigger_polling_when_not_requested() {
+        // 구독 미요청이면 WS_URL이 있어도 폴링
+        assert_eq!(
+            resolve_trigger_mode(false, Some("wss://eth")),
+            TriggerMode::Polling
+        );
+    }
+
+    #[test]
+    fn trigger_polling_fallback_when_no_ws() {
+        // 구독 요청했으나 WS 없음 → 폴백(무회귀)
+        assert_eq!(resolve_trigger_mode(true, None), TriggerMode::Polling);
+    }
+
+    #[test]
+    fn trigger_polling_when_ws_blank() {
+        // 공백/whitespace는 미지정과 동치
+        assert_eq!(resolve_trigger_mode(true, Some("")), TriggerMode::Polling);
+        assert_eq!(
+            resolve_trigger_mode(true, Some("   ")),
+            TriggerMode::Polling
+        );
+    }
+
+    #[test]
+    fn trigger_subscribe_when_requested_and_ws_present() {
+        assert_eq!(
+            resolve_trigger_mode(true, Some("wss://eth")),
+            TriggerMode::Subscribe("wss://eth".to_string())
+        );
+    }
+
+    #[test]
+    fn trigger_subscribe_trims_url() {
+        assert_eq!(
+            resolve_trigger_mode(true, Some("  wss://eth  ")),
+            TriggerMode::Subscribe("wss://eth".to_string())
+        );
+    }
+
+    #[test]
+    fn trigger_label_never_leaks_url() {
+        // 라벨은 모드만 — WS URL(시크릿 가능) 비노출
+        assert_eq!(TriggerMode::Polling.label(), "polling");
+        assert_eq!(
+            TriggerMode::Subscribe("wss://secret-key@host".to_string()).label(),
+            "subscribe"
+        );
     }
 }

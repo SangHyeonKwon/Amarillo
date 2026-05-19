@@ -9,8 +9,7 @@ pub struct Config {
     pub database_url: String,
     /// 이더리움 RPC 엔드포인트
     pub rpc_url: String,
-    /// WebSocket 엔드포인트 (Phase 3에서 실시간 구독에 사용)
-    #[allow(dead_code)]
+    /// WebSocket 엔드포인트 (`--subscribe` 시 newHeads 구독에 사용, D011)
     pub ws_url: Option<String>,
     /// 시작 블록 번호
     pub from_block: u64,
@@ -22,6 +21,8 @@ pub struct Config {
     pub poll_interval_secs: u64,
     /// 확인 지연: head - N 까지만 인덱싱 (얕은 reorg 완화, D009)
     pub confirmations: u64,
+    /// follow 트리거를 newHeads 구독으로 (WS_URL 동반 필요, D011). 기본 false=폴링
+    pub subscribe: bool,
     /// 동시 처리할 최대 블록 수
     pub max_concurrent_blocks: usize,
     /// 배치 INSERT 크기
@@ -61,6 +62,7 @@ impl Config {
             follow: false,
             poll_interval_secs: 12,
             confirmations: 12,
+            subscribe: false,
             max_concurrent_blocks,
             batch_size,
             max_db_connections: env::var("MAX_DB_CONNECTIONS")
@@ -83,10 +85,12 @@ impl Config {
         follow: bool,
         poll_interval_secs: u64,
         confirmations: u64,
+        subscribe: bool,
     ) -> Self {
         self.follow = follow;
         self.poll_interval_secs = poll_interval_secs;
         self.confirmations = confirmations;
+        self.subscribe = subscribe;
         self
     }
 }
