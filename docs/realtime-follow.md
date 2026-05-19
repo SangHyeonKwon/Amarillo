@@ -45,15 +45,26 @@ then re-indexes on the next iteration.
 
 - **Safety**: if any chain hash is unavailable (RPC error / block absent) the
   check yields *no fork* — never a destructive rollback on uncertain data.
-- **Scan window** = `max(--confirmations, 64)` blocks. A reorg deeper than the
-  window rolls back conservatively (floor = lowest checked block), not
-  minimally; widening on demand is future work (S07).
+- **Scan window** = `max(--confirmations, 64)` blocks. A reorg **deeper than
+  the window is _not_ fully corrected**: the whole window mismatches,
+  `find_fork_point` returns the window floor, and `rollback_from_block` only
+  deletes `>= floor` — older blocks below the window that belong to the
+  abandoned chain are **kept** (under-deletion → potential silent
+  inconsistency). This is *not* a conservative over-delete. Correctness relies
+  on the unstated assumption *reorg depth ≤ scan window*; on mainnet that holds
+  in practice (PoS finality ≈ 64 blocks ≤ window, plus the confirmations lag),
+  so practical risk is low — but it is **not unconditionally "safe"**. Dynamic
+  window widening to the true common ancestor is S07-T03.
 
 ## Limits / scope (see `.gsd/DECISIONS.md` D009, D010)
 
 - Polling, not `eth_subscribe` (→ S07).
-- Reorgs within the scan window are detected & corrected (S06). Deeper-than-
-  window reorgs roll back conservatively.
+- Reorgs **within** the scan window are detected & corrected exactly (S06).
+  Reorgs **deeper than** the window are under-corrected (stale pre-window
+  blocks retained → potential silent inconsistency) — low practical risk on
+  mainnet given PoS finality, full fix is S07-T03. An earlier draft of this
+  doc/D010/S06-SUMMARY mislabeled this as a safe "conservative over-delete";
+  corrected 2026-05-20 (review R1).
 
 ## Verification
 

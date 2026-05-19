@@ -37,14 +37,38 @@ Slice 목표: follow 파이프라인을 운영 가능한 수준으로 — 관측
 **Must-haves**
 - *Truths*
   - `find_fork_point`가 윈도우 floor(전부 불일치)를 반환하면 스캔 폭을 cap까지
-    배수 확대해 **최소 공통조상**을 찾는다(과삭제 축소). 순수 로직 → 단위테스트
+    배수 확대해 **최소 공통조상**을 찾는다(현재 **under-delete 갭** 해소 — 리뷰
+    R1; 앞서 "과삭제 축소"라 잘못 적었던 것 정정). 순수 로직 → 단위테스트
     (경계: cap 도달, 점진 확대). 안전규칙(불확실→무롤백) 유지
+  - **R2 흡수**: 윈도우 확대는 tip→**lazy 조회**로 한다 — tip 해시 일치면 1 RPC로
+    단락, 불일치 시에만 더 깊이(현 `detect_fork`의 전량 prefetch가 short-circuit을
+    무력화하는 비용 결함 동시 해소). 순수 부분 단위테스트, 라이브 수동 스모크
   - REQUIREMENTS#M002 수용 기준 항목별 ✅ + 전체 게이트 green
 - *Artifacts*: `worker.rs`(확대 로직 + 단위테스트), `.gsd/S07-SUMMARY.md`,
   `.gsd/M002-SUMMARY.md`, ROADMAP M002 `[x]`
 - *Reassess*: M002 출하 후에만 M003(`[sketch]`) 분해 착수(GSD-2)
 
 ---
+
+## 리뷰 이월 (S05+S06 홀리스틱 리뷰, 2026-05-20)
+
+- **R1 — 정정 완료(코드 무변경)**: 깊은 reorg "보수적=과삭제=안전" 과대서술 →
+  실제 **under-delete**. DECISIONS D010 / S06-SUMMARY / `docs/realtime-follow.md`
+  / 본 PLAN T03 문구를 정직화. KNOWLEDGE에 Lesson 기록.
+- **R2 — T03에 흡수**(위 T03 Truths 참조): `detect_fork` 전량 prefetch가
+  short-circuit 무력화(정상 상태에도 매 폴링 ≤64 RPC). 윈도우 확대를 tip→lazy
+  조회로 구현해 동시 해소.
+- **R3 — 백로그(S07 내 처리 권장)**: 체크포인트가 크게 뒤처진 채 `--follow`
+  시작 → 첫 iteration이 거대한 단일 `index_range`(중간 reorg체크·ctrl_c 무응답).
+  per-iteration 범위 cap(한 사이클 최대 N블록) 도입 검토. T01 관측성으로 lag
+  가시화되면 우선순위 재평가.
+- **R4 — 백로그(문서)**: "graceful Ctrl-C"는 사이클 *사이*에서만 — `index_range`
+  진행 중엔 즉시 안 멈춤. `docs/realtime-follow.md` Ctrl-C 문구를 R3 처리 시
+  함께 정밀화.
+- **R5 — KNOWLEDGE 상속 리스크(S06 책임 아님)**: 마이그레이션 `BEGIN/COMMIT`이
+  sqlx 마이그레이터 자체 트랜잭션과 중첩 — 전 마이그레이션 공통 컨벤션, Postgres가
+  허용해 동작엔 무해. 신규 결함 아님을 KNOWLEDGE에 기록(향후 "신규 발견"으로
+  오인 방지).
 
 ## Slice 수용 (Complete = M002 출하)
 - [ ] T01–T03 must-haves, 폴링 회귀 없음
