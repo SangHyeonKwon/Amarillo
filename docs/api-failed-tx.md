@@ -185,3 +185,9 @@ Two complementary layers: the script exercises the live HTTP endpoint; the
 `cargo test -p db -- --ignored` integration tests exercise the db queries
 directly (and assert the call-tree pre-order invariant). Override the script
 fixture with `GOOD_HASH=… DATABASE_URL=… API_PORT=… ./scripts/verify-failed-tx.sh`.
+
+> **Note on `:3000`** — `verify-failed-tx.sh` builds and runs the API **locally
+> on port 3001** against the compose Postgres, so it does not depend on the
+> compose `api` service. The `docker compose` `api` (port **3000**) serves the
+> image *as previously built*; to expose the M001 endpoints there too, rebuild:
+> `docker compose up -d --build api`.
