@@ -35,6 +35,32 @@ repeat. `Ctrl-C` finishes the in-flight chunk and stops cleanly.
   mode's job; run that first if you need history.
 - **Confirmations lag** trades latency for reorg safety (D009).
 
+## Observability (S07-T01)
+
+Every loop iteration emits **one structured `tracing` summary line**
+(`"follow cycle summary"`, INFO) with parseable fields — no log scraping
+needed, no new dependency (reuses `tracing` + `chrono`):
+
+| Field | Meaning |
+|-------|---------|
+| `cycle` | Loop iteration count (process-local, from 1). |
+| `head` | Chain head from `get_block_number`. |
+| `checkpoint` | Last processed block (`-1` if none yet). |
+| `lag` | Indexing lag = `head − checkpoint` (0 if no checkpoint). |
+| `indexed_this_cycle` | Blocks indexed in this iteration. |
+| `blocks_total` | Cumulative blocks indexed since process start. |
+| `reorgs_total` | Cumulative reorg count. |
+| `last_reorg_depth` | Blocks rolled back in the most recent reorg (0 if none). |
+| `last_poll` | UTC timestamp of this cycle. |
+
+A reorg cycle instead emits two WARN lines (`"reorg detected — rolling
+back"` then `"rolled back — re-indexing next cycle"`) carrying
+`cycle`, `fork`, `depth` (rolled-back block count), `reorgs_total`.
+
+These counters live in process memory only (not persisted) and are
+**observation-only**: branch flow, timing, RPC/DB calls are unchanged
+(no behavior/perf regression).
+
 ## Reorg detection & correction (S06)
 
 Every poll, *before* indexing, the loop compares the most recent local block
