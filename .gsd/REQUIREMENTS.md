@@ -49,6 +49,30 @@ M001·M002 출하로 확정(Reassess). M003 = **S08(구독+웹훅) + S09(조인 
 (시드/오프체인 라벨 등) 조인 1건. 가장 방어 가능한 해자 — 소비 유스케이스
 확정 후 S08 출하 시점에 정제(별도 슬라이스). **M003 출하 = S08 ∧ S09.**
 
+## M004 — Diagnostic Depth (출하 정의)
+
+> "임의의 실패 tx에 대해 *어디서/어떤 함수가/왜* 실패했는지를 단건 호출에 정확하게."
+
+페르소나 = **dApp 개발자**(D014). M001~M003가 데이터·실시간·알림·라벨 조인을
+박았다면, M004는 *진단 그 자체의 품질*. 새 분석 엔드포인트 추가가 아니라 기존
+`/v1/failed-tx/{tx_hash}` 응답이 누적적으로 더 똑똑해진다.
+
+M003 분해 패턴 일관: **M004 = S10 ∧ S11 ∧ S12** (S13 SDK는 `[sketch]`).
+
+**S10 — 콜트리 루트코즈 어트리뷰션** 수용 기준 (mechanically checkable):
+- `GET /v1/failed-tx/{tx_hash}` 응답에 `root_cause: TraceFrame | null` 필드 노출.
+  `trace_log`에서 `error IS NOT NULL`인 가장 빠른(=trace_id ASC) 노드 1건
+  (depth, call_type, addresses, selector, error). 미존재 시 명시 `null`
+  (silent failure 금지).
+- 기존 `call_tree` 배열 + `call_tree_truncated` 계약 불변(D004 일관). 새 필드만 가산.
+- 신규 DB 쿼리 통합테스트(첫 error frame을 정확히 잡고, error 없는 시나리오는
+  `None`), `scripts/verify-failed-tx.sh`에 `root_cause` 의미 단언 추가, 프론트
+  단건 화면에 "Root cause" 카드.
+
+**S11 — failing_function selector → 함수명 + decoded args** `[sketch]`
+**S12 — 카테고리 세분화 v2 + 진단 메시지/추천액션** `[sketch]`
+**S13 — 개발자 SDK/문서 (TS/Python 미니멈 클라이언트 + cookbook)** `[sketch]`
+
 ## 공통 비기능 요건
 
 - CLAUDE.md 절대 규칙 준수 (no `unwrap()` in prod, parameterized SQL, 마이그레이션 경유 등 — KNOWLEDGE.md)

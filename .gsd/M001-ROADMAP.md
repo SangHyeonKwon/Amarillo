@@ -73,6 +73,20 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
     `GET /v1/analytics/failed-tx/by-label` + `verify-failed-tx-by-label.sh` + web
     "Failures by labeled contract" 카드. **D013** (유스케이스 = 컨트랙트 라벨).
 
+## M004 — Diagnostic Depth  🚧 IN PROGRESS
+출하 정의: REQUIREMENTS.md#M004. "어디서/어떤 함수가/왜 실패했는지를 단건 응답에 정확하게."
+페르소나 = dApp 개발자(D014). 새 엔드포인트 추가 대신 기존
+`/v1/failed-tx/{tx_hash}` 응답이 누적적으로 더 똑똑해진다.
+
+- [x] **S10 — 콜트리 루트코즈 어트리뷰션** `[edge: untapped]` · risk: med · **DONE** → S10-SUMMARY.md
+  - `/v1/failed-tx/{tx_hash}` 응답에 `root_cause: TraceLog | null` 가산 (D004 일관)
+  - DB `get_first_error_frame`(trace_id ASC LIMIT 1) + 통합테스트 2 + verify
+    `root_cause` 의미 단언(trace_id 일치) + 프론트 강조 블록. 명시 `null`만 —
+    silent default 금지(D014).
+- [ ] **S11 — failing_function selector → 함수명 + decoded args** `[sketch]` `[edge: weak-spot]`
+- [ ] **S12 — 카테고리 세분화 v2 + 진단 메시지/추천액션** `[sketch]` `[edge: weak-spot]`
+- [ ] **S13 — 개발자 SDK/문서** `[sketch]` — TS/Python 미니멈 클라이언트 + cookbook (프로덕트화)
+
 ---
 
 ## 백로그 (이월 · 우선순위 미정)
