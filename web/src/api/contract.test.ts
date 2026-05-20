@@ -4,6 +4,7 @@ import {
   normalizeAddressParam,
   parseAlertSubscriptionCreatedEnvelope,
   parseAlertSubscriptionListEnvelope,
+  parseFailedTxByLabelEnvelope,
   parseFailedTxDetailEnvelope,
   parseFailedTxEnvelope,
   parseFailedTxListEnvelope,
@@ -267,6 +268,53 @@ describe("api/contract", () => {
         ],
       }),
     ).toThrow(/active/);
+  });
+
+  // ── S09 / M003: failed-tx by-label parser ─────────────────────
+
+  it("parses failed-tx by-label with pivoted by_category map", () => {
+    const parsed = parseFailedTxByLabelEnvelope({
+      data: [
+        {
+          label: "Uniswap V3 SwapRouter",
+          address: "0xe592427a0aece92de3edee1f18e0157c05861564",
+          total_failures: 5,
+          by_category: { SLIPPAGE_EXCEEDED: 3, UNKNOWN: 2 },
+        },
+        {
+          label: "Empty distribution",
+          address: "0xaaaa000000000000000000000000000000000000",
+          total_failures: 0,
+          by_category: {},
+        },
+      ],
+    });
+
+    expect(parsed.data).toHaveLength(2);
+    expect(parsed.data[0].by_category.SLIPPAGE_EXCEEDED).toBe(3);
+    expect(parsed.data[0].by_category.UNKNOWN).toBe(2);
+    // Pivot invariant: sum(by_category) === total_failures
+    const sum = Object.values(parsed.data[0].by_category).reduce(
+      (a, b) => a + b,
+      0,
+    );
+    expect(sum).toBe(parsed.data[0].total_failures);
+    expect(parsed.data[1].by_category).toEqual({});
+  });
+
+  it("failed-tx by-label throws on non-object by_category", () => {
+    expect(() =>
+      parseFailedTxByLabelEnvelope({
+        data: [
+          {
+            label: "x",
+            address: "0xaaaa000000000000000000000000000000000000",
+            total_failures: 1,
+            by_category: "not-an-object",
+          },
+        ],
+      }),
+    ).toThrow(/by_category/);
   });
 
   it("failed-tx detail throws on malformed shape", () => {

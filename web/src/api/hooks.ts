@@ -14,6 +14,7 @@ import {
   parseAlertSubscriptionListEnvelope,
   parseBlockEnvelope,
   parseDailyVolumeEnvelope,
+  parseFailedTxByLabelEnvelope,
   parseFailedTxDetailEnvelope,
   parseFailedTxEnvelope,
   parseFailedTxListEnvelope,
@@ -286,6 +287,39 @@ export function useFailedTxTimeseries({
         { interval, from, to },
         signal,
         parseFailedTxTimeseriesEnvelope,
+      ),
+    select: (r) => r.data,
+    staleTime: STALE_TIME,
+  });
+}
+
+export interface FailedTxByLabelArgs {
+  from?: IsoDateTime;
+  to?: IsoDateTime;
+  /** Tenancy filter — empty/absent = match all labels. */
+  owner?: string;
+  limit?: number;
+}
+
+/**
+ * Failed-tx distribution by labeled contract (S09 / M003) — the demo of
+ * `failed_transaction × transaction × contract_label`. Returns one row per
+ * (label, address) with `total_failures` and a `by_category` map.
+ */
+export function useFailedTxByLabel({
+  from,
+  to,
+  owner,
+  limit = 50,
+}: FailedTxByLabelArgs = {}) {
+  return useQuery({
+    queryKey: ["analytics", "failed-tx", "by-label", { from, to, owner, limit }],
+    queryFn: ({ signal }) =>
+      apiGet(
+        "/v1/analytics/failed-tx/by-label",
+        { from, to, owner, limit },
+        signal,
+        parseFailedTxByLabelEnvelope,
       ),
     select: (r) => r.data,
     staleTime: STALE_TIME,
