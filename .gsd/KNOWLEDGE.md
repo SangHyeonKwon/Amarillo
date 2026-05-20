@@ -107,3 +107,20 @@ GSD-2: Rules(불변) + Patterns/Lessons(누적). 실행 전 반드시 읽는다.
   (savepoint류 무사용) 전 마이그레이션 공통 컨벤션이라 동작엔 무해 — S06이
   만든 결함이 아니다. 향후 마이그레이션 작업 시 "새 버그"로 오인하지 말 것.
   진짜 정리하려면 컨벤션 전체를 한 번에 바꿔야 함(별도 단위, 현재 불요).
+- **[S08-T01 실측] `trg_transaction_check_failed` 트리거가 카테고리를 "선점"**:
+  status=0 transaction INSERT 직후 PostgreSQL 트리거가
+  `failed_transaction(tx_hash, error_category='UNKNOWN', gas_used, timestamp)`를
+  자동 INSERT(`ON CONFLICT (tx_hash) DO NOTHING`). 이후 호출 측이
+  `insert_failed_transactions(category=SlippageExceeded)`를 부르면 ON CONFLICT로
+  **silent no-op** → DB엔 UNKNOWN이 박힘. 호출 측 카테고리가 사라지는 함정.
+  실제 인덱서 경로는 정상 작동(트리거는 ON CONFLICT 덕에 호출 측 INSERT가 먼저면
+  no-op), 함정은 **순서 역전 시도**에서만 발현. 테스트 픽스처에서 카테고리를
+  정확히 박으려면 트리거의 INSERT를 직접 활용하거나(`error_category=None`으로
+  매칭) 트리거 이후 UPDATE를 해야 한다. (S08-T01 통합테스트가 트리거 활용으로 우회.)
+- **[S08-T01 실측 / KNOWLEDGE 수정] FK 완화는 *부분적*이다**: 앞선 KNOWLEDGE에
+  "FK가 relax_fk_and_checkpoint로 완화돼 이벤트 INSERT가 안 깨짐"이라 적었으나,
+  **`failed_transaction.tx_hash → transaction.tx_hash` FK는 보존**(에러 23503으로
+  실측). swap/liquidity 등 이벤트 쪽 FK가 완화된 것이지 모든 FK가 빠진 게 아니다.
+  S08 매칭 쿼리도 이 FK를 사실로 가정하고 `JOIN transaction t ON t.tx_hash = f.tx_hash`
+  의 LEFT JOIN 사용 — 안전. 차후 마이그레이션 작업 시 정확한 현 상태는 `psql`
+  `\d failed_transaction`로 확인.
