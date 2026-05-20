@@ -1047,6 +1047,29 @@ pub async fn delete_alert_subscription(
     Ok(res.rows_affected())
 }
 
+/// 활성 구독의 `signing_secret`을 회전한다(HARDEN2-T02). 호출자가 새 시크릿을
+/// 생성해 넘긴다(API는 CSPRNG 32B hex). 미존재/비활성 구독 → `None` (API는
+/// 404로 매핑). 멱등: 같은 시크릿 재호출도 동일 결과(`active=TRUE` 조건만 만족).
+#[tracing::instrument(skip(pool, new_secret))]
+pub async fn rotate_alert_subscription_secret(
+    pool: &PgPool,
+    subscription_id: i64,
+    new_secret: &str,
+) -> Result<Option<AlertSubscription>, DbError> {
+    let row = sqlx::query_as::<_, AlertSubscription>(
+        "UPDATE alert_subscription
+            SET signing_secret = $2
+          WHERE subscription_id = $1 AND active = TRUE
+        RETURNING subscription_id, error_category, to_addr, webhook_url,
+                  signing_secret, active, created_at",
+    )
+    .bind(subscription_id)
+    .bind(new_secret)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// 한 (구독 × tx) 쌍에 대한 전송 권리를 **원자적으로 claim** 한다 (HARDEN-T02).
 ///
 /// `INSERT … ON CONFLICT DO UPDATE WHERE`로 락 없이 한 문장에서 보장한다:
