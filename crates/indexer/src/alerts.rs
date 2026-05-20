@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use hmac::{Hmac, Mac};
+use serde::Serialize;
 use sha2::Sha256;
 use sqlx::PgPool;
 
@@ -52,12 +53,23 @@ pub struct DispatchMetrics {
     pub unsafe_url_skipped: u64,
 }
 
-/// 안정 직렬화된 webhook 본문 — 키 순서·공백 고정으로 서명 결정성 보장.
+/// webhook 본문 페이로드 — `serde` derive로 키 순서(struct 정의 순) 고정해 서명
+/// 결정성 보장. 수기 `format!` 보간 대신 derive를 써 future-field 추가 시 escape
+/// 버그를 방지한다(리뷰 L2).
+#[derive(Serialize)]
+struct AlertPayload<'a> {
+    subscription_id: i64,
+    tx_hash: &'a str,
+}
+
+/// 안정 직렬화된 webhook 본문. `subscription_id`/`tx_hash`만 담는 고정 스키마라
+/// 직렬화 실패는 발생하지 않음(infallible — `expect`로 명시).
 fn build_payload(m: &AlertMatch) -> String {
-    format!(
-        r#"{{"subscription_id":{},"tx_hash":"{}"}}"#,
-        m.subscription_id, m.tx_hash
-    )
+    serde_json::to_string(&AlertPayload {
+        subscription_id: m.subscription_id,
+        tx_hash: &m.tx_hash,
+    })
+    .expect("AlertPayload {i64, &str} cannot fail to serialize")
 }
 
 async fn post_signed(
@@ -112,8 +124,31 @@ pub async fn dispatch_once(
             .await?;
             continue;
         }
+        // HMAC 키는 저장된 hex 문자열을 **32바이트로 디코드**한 것(리뷰 H2 —
+        // 수신자가 hex를 키로 그대로 쓰지 않고 디코드하는 일반적 기대 일치).
+        // API는 항상 64-hex를 박지만 외부 변조에 대비해 실패 시 안전 기록.
+        let key = match hex::decode(&item.signing_secret) {
+            Ok(k) => k,
+            Err(_) => {
+                metrics.failed += 1;
+                tracing::warn!(
+                    subscription_id = item.subscription_id,
+                    tx_hash = %item.tx_hash,
+                    "stored signing_secret is not valid hex — recording as failed"
+                );
+                db::queries::record_alert_delivery(
+                    pool,
+                    item.subscription_id,
+                    &item.tx_hash,
+                    false,
+                    Some("corrupt signing_secret (not hex)"),
+                )
+                .await?;
+                continue;
+            }
+        };
         let body = build_payload(&item);
-        let signature = sign_payload(item.signing_secret.as_bytes(), body.as_bytes());
+        let signature = sign_payload(&key, body.as_bytes());
         match post_signed(client, &item.webhook_url, &signature, body).await {
             Ok(()) => {
                 metrics.delivered += 1;
@@ -133,7 +168,10 @@ pub async fn dispatch_once(
             }
             Err(e) => {
                 metrics.failed += 1;
-                let err_msg = e.to_string();
+                // 리뷰 L1: 외부 에러 메시지(reqwest)는 URL/IP/내부 진단을 포함할
+                // 수 있어 `alert_delivery.last_error`에 영구 저장된다 — 길이 캡으로
+                // 무한 누적·과다 누설 방지(URL 마스킹은 별도 백로그).
+                let err_msg: String = e.to_string().chars().take(500).collect();
                 tracing::warn!(
                     subscription_id = item.subscription_id,
                     tx_hash = %item.tx_hash,
@@ -229,6 +267,23 @@ mod tests {
     fn sign_payload_accepts_empty_key_and_body() {
         let sig = sign_payload(b"", b"");
         assert_eq!(sig.len(), 64);
+    }
+
+    #[test]
+    fn dispatcher_key_uses_hex_decoded_secret() {
+        // 리뷰 H2 회귀: 저장된 hex 문자열을 디코드한 32바이트를 HMAC 키로 쓴다
+        // — `as_bytes()`로 hex 문자(64B ASCII)를 그대로 키로 쓰는 경로와는 결과가
+        // 달라야 한다(수신자 인터옵 기대치 일치).
+        let hex_secret = "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b";
+        let body = b"Hi There";
+        let decoded = hex::decode(hex_secret).expect("test fixture is valid hex");
+        let with_decode = sign_payload(&decoded, body);
+        let without_decode = sign_payload(hex_secret.as_bytes(), body);
+        assert_ne!(
+            with_decode, without_decode,
+            "decoded(32B) vs as-bytes(64B hex chars) must produce different HMACs"
+        );
+        assert_eq!(with_decode.len(), 64);
     }
 
     // ── 본문 빌더 ──────────────────────────────────────────────
