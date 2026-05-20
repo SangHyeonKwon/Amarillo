@@ -25,6 +25,11 @@ const USER_AGENT: &str = concat!("amarillo-alerts/", env!("CARGO_PKG_VERSION"));
 const SIGNATURE_HEADER: &str = "X-Amarillo-Signature";
 const REQUEST_TIMEOUT_SECS: u64 = 10;
 const DISPATCH_BATCH: i64 = 100;
+/// claim 토큰이 stale로 간주되는 임계 (HARDEN-T02). 잡고 죽은 워커의 'claimed'
+/// 행은 이 시간 후 자동 재claim 가능. `REQUEST_TIMEOUT_SECS` (10s)의 6배 마진.
+/// `find_pending_alert_matches` 의 anti-join도 같은 값을 사용 — 두 함수가 한
+/// 기준을 공유해야 동일 row가 한 워커에게만 보임.
+const CLAIM_STALE_AFTER_SECS: i64 = 60;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -43,7 +48,7 @@ pub fn sign_payload(secret: &[u8], body: &[u8]) -> String {
 pub struct DispatchMetrics {
     /// 루프 사이클 수
     pub cycles: u64,
-    /// 시도한 매칭 건수(누적)
+    /// 시도한 매칭 건수(누적) — 매칭 후보 모두
     pub attempted: u64,
     /// 성공 전송 누적
     pub delivered: u64,
@@ -51,6 +56,9 @@ pub struct DispatchMetrics {
     pub failed: u64,
     /// SSRF 가드로 스킵된 매칭(실패로 기록)
     pub unsafe_url_skipped: u64,
+    /// claim 실패로 스킵된 매칭 — 다른 워커가 들고 있거나 이미 delivered
+    /// (HARDEN-T02). 정상 분산 처리의 신호이지 결함이 아님.
+    pub claim_skipped: u64,
 }
 
 /// webhook 본문 페이로드 — `serde` derive로 키 순서(struct 정의 순) 고정해 서명
@@ -103,9 +111,28 @@ pub async fn dispatch_once(
     batch: i64,
     metrics: &mut DispatchMetrics,
 ) -> Result<()> {
-    let pending = db::queries::find_pending_alert_matches(pool, batch).await?;
+    let pending =
+        db::queries::find_pending_alert_matches(pool, batch, CLAIM_STALE_AFTER_SECS).await?;
     for item in pending {
         metrics.attempted += 1;
+        // 원자적 claim 토큰 발급(HARDEN-T02). 실패 = 다른 워커 진행 중 또는
+        // 이미 delivered — 양쪽 모두 정상 흐름이라 다음 매칭으로 건너뜀.
+        let claimed = db::queries::try_claim_alert_match(
+            pool,
+            item.subscription_id,
+            &item.tx_hash,
+            CLAIM_STALE_AFTER_SECS,
+        )
+        .await?;
+        if !claimed {
+            metrics.claim_skipped += 1;
+            tracing::debug!(
+                subscription_id = item.subscription_id,
+                tx_hash = %item.tx_hash,
+                "claim not acquired (held by another worker or already delivered) — skipping"
+            );
+            continue;
+        }
         if let Err(reason) = webhook_url_is_safe(&item.webhook_url) {
             tracing::warn!(
                 subscription_id = item.subscription_id,
@@ -214,6 +241,7 @@ pub async fn dispatch_loop(pool: PgPool, poll: Duration) -> Result<()> {
             delivered = metrics.delivered,
             failed = metrics.failed,
             unsafe_url_skipped = metrics.unsafe_url_skipped,
+            claim_skipped = metrics.claim_skipped,
             "dispatch cycle summary"
         );
         tokio::select! {
