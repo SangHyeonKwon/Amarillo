@@ -134,12 +134,19 @@ export interface TraceLog {
   trace_id: number;
 }
 
-/** `GET /v1/failed-tx/{tx_hash}` payload (S01 + S04 N+1 truncation). */
+/** `GET /v1/failed-tx/{tx_hash}` payload (S01 + S04 N+1 truncation, S10 root_cause). */
 export interface FailedTxDetail {
   failed: FailedTransaction;
   call_tree: TraceLog[];
   /** True when `call_tree` hit the response cap; the tail was dropped. */
   call_tree_truncated: boolean;
+  /**
+   * The first `call_tree` frame whose `error` is non-null — the *origin* of
+   * the revert in `trace_id ASC` (= pre-order DFS) order (S10 / M004).
+   * `null` is explicit: the indexer recorded no per-frame error for this tx
+   * (silent default is intentionally not allowed; see `.gsd/DECISIONS.md` D014).
+   */
+  root_cause: TraceLog | null;
 }
 
 /** One bucket of the failure timeseries (`failed_tx_timeseries`, S03). */

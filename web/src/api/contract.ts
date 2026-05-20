@@ -386,12 +386,26 @@ function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
       `Invalid contract at ${path}.call_tree_truncated: expected boolean.`,
     );
   }
+  // S10 / M004 — root_cause must be explicitly present as null or a TraceLog
+  // object. A missing key is rejected: silent default is intentionally not
+  // allowed, so clients can't confuse "indexer recorded no error" with
+  // "backend forgot to send the field".
+  if (!("root_cause" in obj)) {
+    throw new Error(
+      `Invalid contract at ${path}.root_cause: missing (expected null or object).`,
+    );
+  }
+  const root_cause =
+    obj.root_cause === null
+      ? null
+      : parseTraceLog(obj.root_cause, `${path}.root_cause`);
   return {
     failed: parseFailedTransaction(obj.failed, `${path}.failed`),
     call_tree: obj.call_tree.map((item, idx) =>
       parseTraceLog(item, `${path}.call_tree[${idx}]`),
     ),
     call_tree_truncated: obj.call_tree_truncated,
+    root_cause,
   };
 }
 
