@@ -123,9 +123,13 @@
 - **검증 제약(D009~D011과 동일)**: 라이브 전송은 수신 엔드포인트 필요(CI 미보장)
   → 순수 SSRF 가드·HMAC 서명·매칭 술어 단위테스트 + 매칭 쿼리 통합테스트(PG)가
   1차 증빙, 실제 POST·재시도는 컴파일+clippy+수동 스모크·문서.
-- **REALIZED & DEVIATION (2026-05-20, S08-T02, 정직 표기)**: ④에서 "신규 의존성
-  `reqwest` 1개 수용"이라 했으나 실제 추가는 **3개** — `reqwest`(0.12, rustls,
-  default-features=off) + `hmac`(0.12) + `sha2`(0.10). HMAC-SHA256은
-  RustCrypto의 표준 도구로, 손수 구현(특히 crypto)은 anti-pattern이라 도입 1개로는
-  실현 불가했음. 모두 `no_std`-friendly, 작고, 시스템 의존 없음(rustls-tls). 본 줄로
-  계획 문구를 사실로 정정한다(D012 결정 자체는 변경 없음).
+- **REALIZED & DEVIATION (2026-05-20, S08-T02/T03, 정직 표기)**: ④에서 "신규
+  의존성 `reqwest` 1개 수용"이라 했으나 S08 전체 실제 추가는 **5개**:
+  - `reqwest`(0.12, rustls, default-features=off) — 아웃바운드 HTTP (T02)
+  - `hmac`(0.12) + `sha2`(0.10) — HMAC-SHA256 본문 서명 (T02, RustCrypto)
+  - `url`(2) — SSRF 가드의 URL 파서, db 크레이트에 둠(api/indexer 공유, T03)
+  - `getrandom`(0.2) — signing_secret CSPRNG (T03, api 전용)
+
+  모두 작고 `no_std`-friendly, 시스템 의존 없음(rustls-tls). HMAC/SHA/CSPRNG/HTTP
+  를 손수 구현하는 건 crypto·security 영역에서 anti-pattern이라 도입 1개로는 실현
+  불가했음. 본 줄로 계획 문구를 사실로 정정한다(D012 결정 자체는 변경 없음).
