@@ -144,17 +144,21 @@ in `alert_delivery` with `status='delivered'`:
 
 **Operational constraints (honest):**
 
-- **Run a single dispatcher.** `find_pending_alert_matches` (SELECT) and
-  `record_alert_delivery` (UPSERT) are *not* atomic; two dispatchers can
-  pick the same `(subscription, tx)` and both POST before either records
-  a delivered row. `alert_delivery`'s composite PK still prevents
-  duplicate rows, but the webhook fires twice. Worker-claim semantics
-  (e.g. `SELECT … FOR UPDATE SKIP LOCKED`) are backlog — until then,
-  deploy exactly one `--dispatch-alerts` process.
-- **Per-cycle POSTs are sequential.** Batch 100 × 10 s timeout ⇒ a fully
-  pending sweep can take ~17 min before the next sleep, and `Ctrl-C` is
-  only honored between sweeps. Bounded parallelism (`buffer_unordered`)
-  is backlog; current behaviour fits "small N of subscribers".
+- **Multi-dispatcher safe (HARDEN-T02)**. Before POSTing, the dispatcher
+  calls `try_claim_alert_match` — an atomic `INSERT … ON CONFLICT DO
+  UPDATE WHERE` that flips the row to `status='claimed'` only if it was
+  previously `failed` or a stale `claimed` (>= `CLAIM_STALE_AFTER_SECS`
+  = 60s; the `alert_delivery` PK plus the WHERE clause guarantee
+  exactly one worker observes a successful claim for any given
+  `(sub, tx)`). Workers that lose the race skip and increment
+  `claim_skipped`. A crashed worker's `claimed` row is automatically
+  re-claimable after 60 s. `find_pending_alert_matches`'s anti-join
+  shares the same staleness window so the two functions stay in lock-
+  step — no SELECT-then-POST race window left.
+- **Per-cycle POSTs are still sequential** (HARDEN-T03 will introduce
+  bounded parallelism via `tokio::JoinSet`). Today: batch 100 × 10 s
+  timeout ⇒ a fully pending sweep can take ~17 min before the next
+  sleep, and `Ctrl-C` is only honored between sweeps.
 
 ## Verification
 
