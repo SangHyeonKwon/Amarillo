@@ -83,7 +83,13 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
   - DB `get_first_error_frame`(trace_id ASC LIMIT 1) + 통합테스트 2 + verify
     `root_cause` 의미 단언(trace_id 일치) + 프론트 강조 블록. 명시 `null`만 —
     silent default 금지(D014).
-- [ ] **S11 — failing_function selector → 함수명 + decoded args** `[sketch]` `[edge: weak-spot]`
+- [x] **S11 — selector → 함수명 + signature 디코딩** `[edge: weak-spot]` · risk: med · **DONE** → S11-SUMMARY.md
+  - `function_signature(selector PK, name, signature, source?)` 멱등 시드 17건
+    (ERC20 5 + Uniswap V3 SwapRouter 6 + Factory 1 + Pool 3 + WETH9 2)
+  - `FailedTxDetail.failing_function_decoded: DecodedFunction | null` 가산
+    (D004 일관, silent default 금지) + DB lookup + 핸들러 가산 + 통합테스트 4 +
+    verify DECODED semantics + 프론트 KPI 갱신. **D015** (args 분리, 자기시드 정책).
+- [ ] **S11.1 — args 디코딩 + root_cause input 디코드** `[sketch]` `[edge: weak-spot]`
 - [ ] **S12 — 카테고리 세분화 v2 + 진단 메시지/추천액션** `[sketch]` `[edge: weak-spot]`
 - [ ] **S13 — 개발자 SDK/문서** `[sketch]` — TS/Python 미니멈 클라이언트 + cookbook (프로덕트화)
 

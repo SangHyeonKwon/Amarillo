@@ -174,3 +174,29 @@
 - **검증 제약(D009~D013 일관)**: 통합 PG(`-p db --ignored`) + verify HTTP +
   clippy/fmt + web typecheck/test/build. 라이브 메인넷 tx 자동 회귀는 불가능 —
   자기 시드로 의미 단언, 메인넷은 수동·운영 측.
+
+## D015 — S11 스코프: selector → name + signature(까지), args 디코딩은 별 슬라이스
+- **결정**: S11(`failing_function` selector → 함수명 디코딩)의 1차 스코프는
+  **selector → name + signature 매핑까지**. ABI args 디코딩(typed value 추출)은
+  같은 슬라이스에 포함하지 않고 별 슬라이스(`S11.1` sketch) 또는 S12와 묶음으로
+  보류. `function_signature(selector PK, name, signature, source?)` 자기소유
+  시드 + `FailedTxDetail.failing_function_decoded: Option<DecodedFunction>`
+  1필드 가산.
+- **이유**: args 디코딩은 그 자체로 한 유닛 이상 — ABI 타입 시스템(address/
+  uint256/bytes/tuple/dynamic 등) + 입력 bytes → typed value의 ABI decoder
+  호출 + 중첩 처리. *이름*만 알아도 dApp 개발자에겐 "내 트랜잭션의 `transfer`
+  가 실패했다"가 즉시 보이는 큰 가치. 슬라이스는 컨텍스트 1개(GSD-2).
+  selector↔name이 1단계, args는 2단계.
+- **스코프**: D003 동결 유지. 시드는 ERC20 5종(transfer/approve/transferFrom/
+  balanceOf/allowance) + Uniswap V3 SwapRouter 핵심 4(exactInputSingle/
+  exactOutputSingle/exactInput/exactOutput) + Factory createPool + WETH9
+  deposit/withdraw + Pool mint/burn/collect 등 10여 selector. 외부 의존
+  미도입(D008/D014 정신; 4byte.directory 등 보류).
+- **트레이드오프**: `root_cause.input`의 selector도 같은 디코드 대상이지만
+  본 슬라이스에선 `failing_function_decoded` 1필드만 — root_cause input
+  디코드 가산은 후속 슬라이스(S11.1) 호흡. 응답에 또 하나 필드 추가 = 별
+  슬라이스 단위(GSD-2 일관).
+- **검증 제약(D009~D014 일관)**: 통합테스트 + verify HTTP + clippy/fmt + web.
+  실측: `failing_function`이 이미 인덱서 루트 frame input 첫 4바이트로 채워짐
+  (`crates/indexer/src/worker.rs:597`). 그 selector를 lookup해 가산만 하면 됨.
+  라이브 메인넷 자동 회귀 부재 — 자기 시드 selector로 의미 단언.
