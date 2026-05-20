@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { Layout } from "@/components/Layout";
+import { Alerts } from "@/pages/Alerts";
 import { Overview } from "@/pages/Overview";
 import { Pools } from "@/pages/Pools";
 import { PoolDetail } from "@/pages/PoolDetail";
@@ -16,6 +17,7 @@ export function App() {
         <Route path="pools/:address" element={<PoolDetail />} />
         <Route path="failed-tx" element={<FailedTx />} />
         <Route path="traders" element={<Traders />} />
+        <Route path="alerts" element={<Alerts />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
     </Routes>
