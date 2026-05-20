@@ -67,13 +67,13 @@ async fn main() -> anyhow::Result<()> {
 
     // CLI + 환경변수 설정 로드
     let cli = Cli::parse();
-    let mode_count =
-        (cli.dispatch_alerts as u8) + (cli.follow as u8) + (cli.from_block.is_some() as u8);
-    if mode_count == 0 {
-        anyhow::bail!("specify one of: --from-block, --follow, --dispatch-alerts");
+    // 리뷰 M3: 사전 동작 `--follow + --from-block`(from-block 무시)을 보존하기 위해
+    // 상호배타는 `--dispatch-alerts`에만 적용한다.
+    if cli.dispatch_alerts && (cli.follow || cli.from_block.is_some()) {
+        anyhow::bail!("--dispatch-alerts is mutually exclusive with --follow / --from-block");
     }
-    if mode_count > 1 {
-        anyhow::bail!("--from-block / --follow / --dispatch-alerts are mutually exclusive");
+    if !cli.dispatch_alerts && !cli.follow && cli.from_block.is_none() {
+        anyhow::bail!("specify one of: --from-block, --follow, --dispatch-alerts");
     }
 
     // Dispatcher 모드는 RPC 불필요 — Config::from_env(RPC_URL 강제) 우회.
