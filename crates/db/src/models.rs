@@ -442,3 +442,58 @@ pub struct FailedTxTrendPoint {
     /// 해당 버킷·카테고리의 실패 건수
     pub failure_count: i64,
 }
+
+/// 실패 패턴 알림 구독 (alert_subscription).
+///
+/// `signing_secret`은 생성 응답([`AlertSubscriptionCreated`])에서 **1회만** 노출
+/// 하고, 목록 직렬화에선 `#[serde(skip_serializing)]`로 제외한다(시크릿).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AlertSubscription {
+    /// 구독 ID (PK)
+    pub subscription_id: i64,
+    /// 매칭할 에러 카테고리 (None = 모든 카테고리)
+    pub error_category: Option<ErrorCategory>,
+    /// 매칭할 컨트랙트 주소(소문자) (None = 모든 주소)
+    pub to_addr: Option<String>,
+    /// 알림을 POST 할 webhook URL
+    pub webhook_url: String,
+    /// per-구독 HMAC-SHA256 키 — 로그/목록 응답에 노출 금지
+    #[serde(skip_serializing)]
+    pub signing_secret: String,
+    /// 활성 여부
+    pub active: bool,
+    /// 생성 시각
+    pub created_at: DateTime<Utc>,
+}
+
+/// 구독 생성(POST) 응답 — `signing_secret`을 **이때 한 번만** 반환한다.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertSubscriptionCreated {
+    /// 구독 ID (PK)
+    pub subscription_id: i64,
+    /// 매칭 에러 카테고리 (None = 모든 카테고리)
+    pub error_category: Option<ErrorCategory>,
+    /// 매칭 컨트랙트 주소(소문자) (None = 모든 주소)
+    pub to_addr: Option<String>,
+    /// 알림 webhook URL
+    pub webhook_url: String,
+    /// HMAC 서명 키 — 생성 직후 **1회만** 노출(이후 조회 불가)
+    pub signing_secret: String,
+    /// 활성 여부
+    pub active: bool,
+    /// 생성 시각
+    pub created_at: DateTime<Utc>,
+}
+
+/// 디스패처가 전송할 (구독 × 미전송 실패 tx) 매칭 1건. 내부용(직렬화 안 함).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AlertMatch {
+    /// 대상 구독 ID
+    pub subscription_id: i64,
+    /// 매칭된 실패 tx 해시
+    pub tx_hash: String,
+    /// 전송 대상 webhook URL
+    pub webhook_url: String,
+    /// 본문 서명용 HMAC 키
+    pub signing_secret: String,
+}

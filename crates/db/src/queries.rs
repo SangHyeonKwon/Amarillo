@@ -3,9 +3,10 @@ use sqlx::PgPool;
 
 use crate::error::DbError;
 use crate::models::{
-    Block, DailySwapVolume, ErrorCategory, FailedTransaction, FailedTxAnalysis, FailedTxTrendPoint,
-    LiquidityEvent, LiquidityEventType, Pool, PoolStats, PriceSnapshot, SnapshotInterval,
-    SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader, TraceLog, Transaction, UserProfile,
+    AlertMatch, AlertSubscription, Block, DailySwapVolume, ErrorCategory, FailedTransaction,
+    FailedTxAnalysis, FailedTxTrendPoint, LiquidityEvent, LiquidityEventType, Pool, PoolStats,
+    PriceSnapshot, SnapshotInterval, SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader,
+    TraceLog, Transaction, UserProfile,
 };
 
 /// PostgreSQL enum 값으로 변환하는 헬퍼.
@@ -886,4 +887,154 @@ pub async fn get_swap_events_by_block(
     .fetch_all(pool)
     .await?;
     Ok(events)
+}
+
+// ============================================
+// Actionable Alerts (S08) — 구독/매칭/전송 기록
+// ============================================
+
+/// 실패 패턴 구독을 생성하고 생성된 행을 반환한다.
+///
+/// `error_category`는 enum 텍스트 바인딩(`$1::error_category`)으로 안전 전달.
+/// `webhook_url`/`signing_secret`은 호출자(API)가 검증·생성해 넘긴다.
+#[tracing::instrument(skip(pool, signing_secret))]
+pub async fn insert_alert_subscription(
+    pool: &PgPool,
+    error_category: Option<&ErrorCategory>,
+    to_addr: Option<&str>,
+    webhook_url: &str,
+    signing_secret: &str,
+) -> Result<AlertSubscription, DbError> {
+    let cat = error_category.map(error_category_to_sql);
+    let row = sqlx::query_as::<_, AlertSubscription>(
+        "INSERT INTO alert_subscription (error_category, to_addr, webhook_url, signing_secret)
+         VALUES ($1::error_category, $2, $3, $4)
+         RETURNING subscription_id, error_category, to_addr, webhook_url,
+                   signing_secret, active, created_at",
+    )
+    .bind(cat)
+    .bind(to_addr)
+    .bind(webhook_url)
+    .bind(signing_secret)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 구독 목록을 최신순으로 최대 `limit`개 조회한다.
+#[tracing::instrument(skip(pool))]
+pub async fn list_alert_subscriptions(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<AlertSubscription>, DbError> {
+    let rows = sqlx::query_as::<_, AlertSubscription>(
+        "SELECT subscription_id, error_category, to_addr, webhook_url,
+                signing_secret, active, created_at
+         FROM alert_subscription
+         ORDER BY subscription_id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 구독을 비활성화한다. 영향받은 행 수를 반환한다(0 = 미존재/이미 비활성).
+#[tracing::instrument(skip(pool))]
+pub async fn deactivate_alert_subscription(
+    pool: &PgPool,
+    subscription_id: i64,
+) -> Result<u64, DbError> {
+    let res = sqlx::query(
+        "UPDATE alert_subscription SET active = FALSE
+         WHERE subscription_id = $1 AND active = TRUE",
+    )
+    .bind(subscription_id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// 아직 전송되지 않은 (활성 구독 × 매칭 실패 tx) 쌍을 최대 `limit`개 반환한다.
+///
+/// 매칭: `error_category`/`to_addr`가 NULL이면 해당 조건은 "모두 매칭". 멱등의
+/// 핵심은 `alert_delivery`에 `status='delivered'`로 기록된 쌍을 anti-join으로
+/// 제외하는 것 — 이미 전송된 알림은 다시 잡히지 않는다(실패분은 재시도됨).
+#[tracing::instrument(skip(pool))]
+pub async fn find_pending_alert_matches(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<AlertMatch>, DbError> {
+    let rows = sqlx::query_as::<_, AlertMatch>(
+        "SELECT s.subscription_id, f.tx_hash, s.webhook_url, s.signing_secret
+         FROM alert_subscription s
+         JOIN failed_transaction f
+           ON (s.error_category IS NULL OR s.error_category = f.error_category)
+         LEFT JOIN transaction t ON t.tx_hash = f.tx_hash
+         WHERE s.active
+           AND (s.to_addr IS NULL OR s.to_addr = t.to_addr)
+           AND NOT EXISTS (
+                 SELECT 1 FROM alert_delivery d
+                 WHERE d.subscription_id = s.subscription_id
+                   AND d.tx_hash = f.tx_hash
+                   AND d.status = 'delivered'
+               )
+         ORDER BY f.tx_hash
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 전송 결과를 멱등 기록한다 (PK `(subscription_id, tx_hash)` upsert).
+///
+/// 재시도 시 `attempts`가 누적되고, `delivered`면 `delivered_at`이 한 번 박힌다.
+/// 이 멱등 기록 + [`find_pending_alert_matches`]의 anti-join이 "정확히 1회 전송"을
+/// 보장한다.
+#[tracing::instrument(skip(pool))]
+pub async fn record_alert_delivery(
+    pool: &PgPool,
+    subscription_id: i64,
+    tx_hash: &str,
+    delivered: bool,
+    last_error: Option<&str>,
+) -> Result<(), DbError> {
+    let status = if delivered { "delivered" } else { "failed" };
+    sqlx::query(
+        "INSERT INTO alert_delivery
+             (subscription_id, tx_hash, status, attempts, last_error, delivered_at)
+         VALUES ($1, $2, $3, 1, $4,
+                 CASE WHEN $3 = 'delivered' THEN NOW() ELSE NULL END)
+         ON CONFLICT (subscription_id, tx_hash) DO UPDATE
+             SET status = EXCLUDED.status,
+                 attempts = alert_delivery.attempts + 1,
+                 last_error = EXCLUDED.last_error,
+                 delivered_at = CASE
+                     WHEN EXCLUDED.status = 'delivered' THEN NOW()
+                     ELSE alert_delivery.delivered_at END",
+    )
+    .bind(subscription_id)
+    .bind(tx_hash)
+    .bind(status)
+    .bind(last_error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 구독을 영구 삭제한다(연관 `alert_delivery`는 FK `ON DELETE CASCADE`로 함께
+/// 삭제). 영향받은 행 수를 반환한다. 보존정책상 완전 삭제·테스트 teardown용.
+#[tracing::instrument(skip(pool))]
+pub async fn delete_alert_subscription(
+    pool: &PgPool,
+    subscription_id: i64,
+) -> Result<u64, DbError> {
+    let res = sqlx::query("DELETE FROM alert_subscription WHERE subscription_id = $1")
+        .bind(subscription_id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
 }
