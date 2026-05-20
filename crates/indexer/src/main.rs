@@ -8,6 +8,7 @@
 //! cargo run -p indexer -- --follow            # 체인 헤드 추종 (S05)
 //! ```
 
+mod alerts;
 mod config;
 mod worker;
 
@@ -48,6 +49,11 @@ struct Cli {
     /// Requires WS_URL; falls back to polling if unavailable (D011).
     #[arg(long)]
     subscribe: bool,
+
+    /// Run the alerts dispatcher only (S08/M003, D012). Mutually exclusive
+    /// with `--follow` and fixed-range. Needs DATABASE_URL only (no RPC).
+    #[arg(long)]
+    dispatch_alerts: bool,
 }
 
 #[tokio::main]
@@ -61,9 +67,35 @@ async fn main() -> anyhow::Result<()> {
 
     // CLI + 환경변수 설정 로드
     let cli = Cli::parse();
-    if !cli.follow && cli.from_block.is_none() {
-        anyhow::bail!("--from-block is required unless --follow is set");
+    let mode_count =
+        (cli.dispatch_alerts as u8) + (cli.follow as u8) + (cli.from_block.is_some() as u8);
+    if mode_count == 0 {
+        anyhow::bail!("specify one of: --from-block, --follow, --dispatch-alerts");
     }
+    if mode_count > 1 {
+        anyhow::bail!("--from-block / --follow / --dispatch-alerts are mutually exclusive");
+    }
+
+    // Dispatcher 모드는 RPC 불필요 — Config::from_env(RPC_URL 강제) 우회.
+    if cli.dispatch_alerts {
+        let database_url = std::env::var("DATABASE_URL")
+            .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?;
+        let max_db_connections = std::env::var("MAX_DB_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10);
+        let db_pool = db::create_pool(&database_url, max_db_connections).await?;
+        db::run_migrations(&db_pool).await?;
+        tracing::info!("database connected and migrations applied");
+        alerts::dispatch_loop(
+            db_pool,
+            std::time::Duration::from_secs(cli.poll_interval_secs),
+        )
+        .await?;
+        tracing::info!("indexer (dispatch-alerts) stopped");
+        return Ok(());
+    }
+
     let config = Config::from_env()?
         .with_block_range(cli.from_block.unwrap_or(0), cli.to_block)
         .with_follow_opts(
