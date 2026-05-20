@@ -761,6 +761,64 @@ export function FailedTx() {
                       call_tree truncated (S04 cap hit) — tail dropped
                     </div>
                   )}
+                  {detail.root_cause ? (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 10,
+                        borderLeft: "3px solid #F66061",
+                        background: "rgba(246,96,97,0.06)",
+                        fontSize: 13,
+                      }}
+                    >
+                      <div className="card-sub" style={{ marginBottom: 6 }}>
+                        Root cause — first revert frame in{" "}
+                        <span className="mono">trace_id ASC</span> (pre-order DFS)
+                      </div>
+                      <div
+                        style={{
+                          fontFamily: "var(--font-mono, monospace)",
+                          fontSize: 12,
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        <span className="muted">
+                          [{detail.root_cause.trace_id}]
+                        </span>{" "}
+                        depth {detail.root_cause.call_depth}{" "}
+                        {detail.root_cause.call_type}{" "}
+                        <span className="mono">
+                          {detail.root_cause.from_addr.slice(0, 10)}…
+                        </span>
+                        {" → "}
+                        <span className="mono">
+                          {detail.root_cause.to_addr
+                            ? `${detail.root_cause.to_addr.slice(0, 10)}…`
+                            : "—"}
+                        </span>
+                        {detail.root_cause.input && (
+                          <>
+                            {" · selector "}
+                            <span className="mono">
+                              {detail.root_cause.input.slice(0, 10)}
+                            </span>
+                          </>
+                        )}
+                        <div style={{ color: "#F66061", marginTop: 6 }}>
+                          err: {detail.root_cause.error}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      className="muted"
+                      style={{ marginTop: 12, fontSize: 13 }}
+                    >
+                      Root cause: <span className="mono">null</span> — the
+                      indexer recorded no per-frame error for this transaction
+                      (silent default is intentionally not allowed; see docs).
+                    </div>
+                  )}
                   <div
                     style={{
                       marginTop: 12,

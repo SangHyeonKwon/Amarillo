@@ -62,6 +62,42 @@ if [ "$gc" = 200 ]; then
   ' || fail=1
 fi
 
+# Assert root_cause semantics (S10 / M004) — must be either null or an object
+# whose trace_id equals the first error frame in call_tree (self-consistency).
+if [ "$gc" = 200 ]; then
+  node -e '
+    const j = require("/tmp/vftx-good.json");
+    const d = j.data || {};
+    if (!Object.prototype.hasOwnProperty.call(d, "root_cause")) {
+      console.log("  ROOT FAIL: root_cause field missing"); process.exit(1);
+    }
+    const rc = d.root_cause;
+    if (rc === null) {
+      console.log("  ROOT OK (null — indexer recorded no per-frame error)");
+    } else if (typeof rc !== "object") {
+      console.log("  ROOT FAIL: root_cause must be null or object, got " + typeof rc);
+      process.exit(1);
+    } else {
+      if (rc.error == null) {
+        console.log("  ROOT FAIL: root_cause.error must be non-null by definition");
+        process.exit(1);
+      }
+      const t = d.call_tree || [];
+      const first = t.find(f => f.error != null);
+      if (!first) {
+        console.log("  ROOT FAIL: root_cause present but no error frame in call_tree");
+        process.exit(1);
+      }
+      if (first.trace_id !== rc.trace_id) {
+        console.log("  ROOT FAIL: root_cause.trace_id=" + rc.trace_id +
+                    " but first call_tree error frame trace_id=" + first.trace_id);
+        process.exit(1);
+      }
+      console.log("  ROOT OK (trace_id=" + rc.trace_id + " matches first error frame in call_tree)");
+    }
+  ' || fail=1
+fi
+
 echo "BAD  ($BAD_HASH): HTTP $bc"
 if [ "$bc" = 404 ] && grep -q '"error"' /tmp/vftx-bad.json; then
   echo "  PASS"

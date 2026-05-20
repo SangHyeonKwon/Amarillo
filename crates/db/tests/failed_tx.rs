@@ -158,3 +158,50 @@ async fn trace_logs_respects_limit() {
         .expect("query ok");
     assert_eq!(one.len(), 1, "limit=1 이면 정확히 1프레임이어야 한다");
 }
+
+/// S10-T01: `get_first_error_frame`이 콜트리의 첫 error frame과 정확히 일치 (자기일관성).
+///
+/// `trace_log`를 trace_id ASC로 받아 첫 `error IS NOT NULL`인 frame을 직접 찾아
+/// `get_first_error_frame`이 반환한 값과 같은지 비교한다. KNOWLEDGE Lesson:
+/// 시드 GOOD tx의 trace_log엔 슬리피지 error frame이 박혀 있다(S01 실측).
+#[tokio::test]
+#[ignore = "requires PostgreSQL: cargo test -p db -- --ignored"]
+async fn first_error_frame_matches_call_tree_first_error() {
+    let pool = db::create_pool(&db_url(), 2).await.expect("connect");
+
+    let frames = db::queries::list_trace_logs_by_tx(&pool, GOOD, i64::MAX)
+        .await
+        .expect("trace ok");
+    let expected = frames.iter().find(|t| t.error.is_some()).cloned();
+    let root = db::queries::get_first_error_frame(&pool, GOOD)
+        .await
+        .expect("query ok");
+
+    match (expected, root) {
+        (Some(e), Some(r)) => {
+            assert_eq!(
+                r.trace_id, e.trace_id,
+                "root_cause must equal the first error frame in trace_id ASC order"
+            );
+            assert!(
+                r.error.is_some(),
+                "root_cause.error must be Some by definition"
+            );
+        }
+        (None, None) => {
+            // 시드 변동으로 error frame이 없으면 root_cause도 None — 자기일관성 유지.
+        }
+        (e, r) => panic!("mismatch: expected_first_error={e:?}, got root_cause={r:?}"),
+    }
+}
+
+/// S10-T01: 트레이스가 없는 해시 → `None` (에러 아님).
+#[tokio::test]
+#[ignore = "requires PostgreSQL: cargo test -p db -- --ignored"]
+async fn first_error_frame_unknown_hash_is_none() {
+    let pool = db::create_pool(&db_url(), 2).await.expect("connect");
+    let root = db::queries::get_first_error_frame(&pool, BAD)
+        .await
+        .expect("query ok");
+    assert!(root.is_none(), "BAD hash has no trace rows → None");
+}

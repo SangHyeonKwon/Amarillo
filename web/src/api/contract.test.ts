@@ -115,6 +115,7 @@ describe("api/contract", () => {
           },
         ],
         call_tree_truncated: true,
+        root_cause: null,
       },
     });
 
@@ -126,6 +127,113 @@ describe("api/contract", () => {
     expect(parsed.data.call_tree[1].trace_id).toBe(2);
     expect(parsed.data.call_tree[1].to_addr).toBeNull();
     expect(parsed.data.call_tree_truncated).toBe(true);
+    expect(parsed.data.root_cause).toBeNull();
+  });
+
+  // ── S10 / M004: root_cause attribution ────────────────────────
+
+  it("failed-tx detail parses root_cause as a TraceLog object (first error frame)", () => {
+    const parsed = parseFailedTxDetailEnvelope({
+      data: {
+        failed: {
+          tx_hash: "0xdead",
+          error_category: "SlippageExceeded",
+          revert_reason: "Too little received",
+          failing_function: "0xa9059cbb",
+          gas_used: 21000,
+          timestamp: "2025-01-01T00:00:00Z",
+        },
+        call_tree: [
+          {
+            tx_hash: "0xdead",
+            call_depth: 0,
+            call_type: "CALL",
+            from_addr: "0x01",
+            to_addr: "0x02",
+            value: "0",
+            gas_used: 21000,
+            input: "0xa9059cbb",
+            output: null,
+            error: "Too little received",
+            trace_id: 4,
+          },
+        ],
+        call_tree_truncated: false,
+        root_cause: {
+          tx_hash: "0xdead",
+          call_depth: 0,
+          call_type: "CALL",
+          from_addr: "0x01",
+          to_addr: "0x02",
+          value: "0",
+          gas_used: 21000,
+          input: "0xa9059cbb",
+          output: null,
+          error: "Too little received",
+          trace_id: 4,
+        },
+      },
+    });
+    expect(parsed.data.root_cause).not.toBeNull();
+    expect(parsed.data.root_cause!.trace_id).toBe(4);
+    expect(parsed.data.root_cause!.error).toBe("Too little received");
+    // Self-consistency with the first error frame in call_tree.
+    const firstErr = parsed.data.call_tree.find((f) => f.error != null);
+    expect(firstErr).toBeDefined();
+    expect(parsed.data.root_cause!.trace_id).toBe(firstErr!.trace_id);
+  });
+
+  it("failed-tx detail rejects a missing root_cause key (silent default forbidden)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: null,
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          // root_cause intentionally omitted — the parser must NOT silently
+          // default to null; explicit null or object only.
+        },
+      }),
+    ).toThrow(/root_cause/);
+  });
+
+  it("failed-tx detail throws on malformed root_cause (e.g. trace_id non-numeric)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: null,
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          root_cause: {
+            tx_hash: "0x1",
+            call_depth: 0,
+            call_type: "CALL",
+            from_addr: "0x01",
+            to_addr: null,
+            value: "0",
+            gas_used: 1,
+            input: null,
+            output: null,
+            error: "something",
+            trace_id: "not-a-number",
+          },
+        },
+      }),
+    ).toThrow(/trace_id/);
   });
 
   it("parses failed-tx list with TotalPaginatedResponse (filter-adjusted total)", () => {

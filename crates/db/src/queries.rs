@@ -618,6 +618,31 @@ pub async fn list_trace_logs_by_tx(
     Ok(logs)
 }
 
+/// 트랜잭션의 **첫 error frame**을 반환한다 — 콜트리에서 실제로 revert가 발생한 위치 (S10 / M004).
+///
+/// `trace_id ASC` = 인덱서가 pre-order DFS로 평탄화하며 삽입한 순서이므로,
+/// `error IS NOT NULL`인 가장 빠른 1행이 *맨 처음 발생한 revert frame*이다.
+/// 매칭 frame 없음 / tx 없음 모두 `None`을 반환한다(에러 아님). API는 명시
+/// `null`로 직렬화 — silent default 금지.
+#[tracing::instrument(skip(pool))]
+pub async fn get_first_error_frame(
+    pool: &PgPool,
+    tx_hash: &str,
+) -> Result<Option<TraceLog>, DbError> {
+    let row = sqlx::query_as::<_, TraceLog>(
+        "SELECT tx_hash, call_depth, call_type, from_addr, to_addr, value,
+                gas_used, input, output, error, trace_id
+         FROM trace_log
+         WHERE tx_hash = $1 AND error IS NOT NULL
+         ORDER BY trace_id ASC
+         LIMIT 1",
+    )
+    .bind(tx_hash)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
 /// 실패 트랜잭션을 필터·페이지네이션하여 조회한다.
 ///
 /// `category`/`from`/`to`는 모두 선택 — `None`이면 해당 필터를 적용하지 않는다
