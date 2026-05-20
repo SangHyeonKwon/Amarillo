@@ -742,9 +742,35 @@ export function FailedTx() {
                       label="Failing function"
                       icon="ƒ"
                       value={
-                        <span className="mono">
-                          {detail.failed.failing_function ?? "—"}
-                        </span>
+                        detail.failing_function_decoded ? (
+                          <span style={{ display: "inline-block", textAlign: "left" }}>
+                            <div style={{ fontWeight: 600 }}>
+                              {detail.failing_function_decoded.name}
+                            </div>
+                            <div
+                              className="mono"
+                              style={{ fontSize: 11, opacity: 0.7 }}
+                            >
+                              {detail.failing_function_decoded.signature}
+                            </div>
+                            {detail.failing_function_decoded.source && (
+                              <span
+                                className="badge"
+                                style={{
+                                  fontSize: 10,
+                                  marginTop: 4,
+                                  display: "inline-block",
+                                }}
+                              >
+                                {detail.failing_function_decoded.source}
+                              </span>
+                            )}
+                          </span>
+                        ) : (
+                          <span className="mono">
+                            {detail.failed.failing_function ?? "—"}
+                          </span>
+                        )
                       }
                     />
                     <KpiCard

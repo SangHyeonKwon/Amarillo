@@ -5,6 +5,7 @@ import type {
   Block,
   DailySwapVolume,
   Decimal,
+  DecodedFunction,
   ErrorCategory,
   FailedTransaction,
   FailedTxAnalysis,
@@ -376,6 +377,16 @@ function parseTraceLog(value: unknown, path: string): TraceLog {
   };
 }
 
+function parseDecodedFunction(value: unknown, path: string): DecodedFunction {
+  const obj = readRecord(value, path);
+  return {
+    selector: readString(obj.selector, `${path}.selector`),
+    name: readString(obj.name, `${path}.name`),
+    signature: readString(obj.signature, `${path}.signature`),
+    source: readOptionalString(obj.source, `${path}.source`),
+  };
+}
+
 function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
   const obj = readRecord(value, path);
   if (!Array.isArray(obj.call_tree)) {
@@ -399,6 +410,19 @@ function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
     obj.root_cause === null
       ? null
       : parseTraceLog(obj.root_cause, `${path}.root_cause`);
+  // S11 / M004 — same explicit-null contract for the decoded function.
+  if (!("failing_function_decoded" in obj)) {
+    throw new Error(
+      `Invalid contract at ${path}.failing_function_decoded: missing (expected null or object).`,
+    );
+  }
+  const failing_function_decoded =
+    obj.failing_function_decoded === null
+      ? null
+      : parseDecodedFunction(
+          obj.failing_function_decoded,
+          `${path}.failing_function_decoded`,
+        );
   return {
     failed: parseFailedTransaction(obj.failed, `${path}.failed`),
     call_tree: obj.call_tree.map((item, idx) =>
@@ -406,6 +430,7 @@ function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
     ),
     call_tree_truncated: obj.call_tree_truncated,
     root_cause,
+    failing_function_decoded,
   };
 }
 

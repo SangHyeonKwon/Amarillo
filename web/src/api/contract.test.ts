@@ -116,6 +116,7 @@ describe("api/contract", () => {
         ],
         call_tree_truncated: true,
         root_cause: null,
+        failing_function_decoded: null,
       },
     });
 
@@ -172,6 +173,7 @@ describe("api/contract", () => {
           error: "Too little received",
           trace_id: 4,
         },
+        failing_function_decoded: null,
       },
     });
     expect(parsed.data.root_cause).not.toBeNull();
@@ -231,9 +233,91 @@ describe("api/contract", () => {
             error: "something",
             trace_id: "not-a-number",
           },
+          failing_function_decoded: null,
         },
       }),
     ).toThrow(/trace_id/);
+  });
+
+  // ── S11 / M004: failing_function_decoded ──────────────────────
+
+  it("failed-tx detail parses failing_function_decoded as DecodedFunction object", () => {
+    const parsed = parseFailedTxDetailEnvelope({
+      data: {
+        failed: {
+          tx_hash: "0xdead",
+          error_category: "Unknown",
+          revert_reason: null,
+          failing_function: "0xa9059cbb",
+          gas_used: 21000,
+          timestamp: "2025-01-01T00:00:00Z",
+        },
+        call_tree: [],
+        call_tree_truncated: false,
+        root_cause: null,
+        failing_function_decoded: {
+          selector: "0xa9059cbb",
+          name: "transfer",
+          signature: "transfer(address,uint256)",
+          source: "erc20",
+        },
+      },
+    });
+    expect(parsed.data.failing_function_decoded).not.toBeNull();
+    expect(parsed.data.failing_function_decoded!.name).toBe("transfer");
+    expect(parsed.data.failing_function_decoded!.selector).toBe("0xa9059cbb");
+    expect(parsed.data.failing_function_decoded!.source).toBe("erc20");
+    // Self-consistency: decoded.selector === failed.failing_function (lower).
+    expect(parsed.data.failing_function_decoded!.selector).toBe(
+      parsed.data.failed.failing_function?.toLowerCase(),
+    );
+  });
+
+  it("failed-tx detail rejects missing failing_function_decoded key (silent default forbidden)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: null,
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          root_cause: null,
+          // failing_function_decoded intentionally omitted
+        },
+      }),
+    ).toThrow(/failing_function_decoded/);
+  });
+
+  it("failed-tx detail throws on malformed failing_function_decoded (e.g. name non-string)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: "0xa9059cbb",
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          root_cause: null,
+          failing_function_decoded: {
+            selector: "0xa9059cbb",
+            name: 12345, // not a string
+            signature: "transfer(address,uint256)",
+            source: "erc20",
+          },
+        },
+      }),
+    ).toThrow(/name/);
   });
 
   it("parses failed-tx list with TotalPaginatedResponse (filter-adjusted total)", () => {
