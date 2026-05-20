@@ -72,17 +72,46 @@ Standalone SQL scripts organized by category: `ddl/`, `dml/`, `queries/`, `proce
 ## Quick Start (Docker)
 
 ```bash
-# Start PostgreSQL + API server
+# Start PostgreSQL + API server + web dashboard
 docker compose up -d
 
 # Load demo data (views, procedures, seed data)
 docker compose run --rm seed
 
-# Verify
+# Verify the API
 curl http://localhost:3000/health
 curl http://localhost:3000/v1/pools
 curl http://localhost:3000/v1/traders/top
+
+# Open the dashboard
+open http://localhost:8080
 ```
+
+## Dashboard
+
+A read-only React analytics dashboard lives in [`web/`](web/README.md) — KPIs,
+daily volume, pool stats, top traders, and a **failed-transaction analysis**
+view (the trace-decoded data that sets this apart from generic on-chain SQL
+platforms). Built with Vite + React + TanStack Query + Recharts; served as the
+`web` service (port 8080) by `docker compose`.
+
+## Failure Intelligence API
+
+The differentiator: per-transaction failure **diagnosis** (decoded revert +
+classified category + flattened call tree), a filtered list with an accurate
+`total`, and a category **trend** feed — the trace-level questions Dune does not
+answer out of the box. Full reference: [`docs/api-failed-tx.md`](docs/api-failed-tx.md).
+
+```bash
+docker compose up -d && docker compose run --rm seed
+./scripts/verify-failed-tx.sh        # runnable smoke + usage example
+```
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /v1/failed-tx/{tx_hash}` | Single tx diagnosis (400 if malformed, 404 if absent) |
+| `GET /v1/failed-tx` | Filtered, paginated list + accurate `total` |
+| `GET /v1/analytics/failed-tx/timeseries` | Failure counts by time bucket × category |
 
 ## Getting Started (Local)
 

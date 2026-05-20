@@ -56,3 +56,16 @@ clap = { version = "4", features = ["derive", "env"] }
 # Web
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Outbound HTTP (alerts dispatcher, S08) — minimal features, no defaults
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# Signing (HMAC-SHA256 for webhook bodies, S08) — RustCrypto, no_std-friendly
+hmac = "0.12"
+sha2 = "0.10"
+
+# URL parsing for SSRF guard (S08) — shared via db::validators
+url = "2"
+
+# CSPRNG for webhook signing-secret generation (S08, API layer)
+getrandom = "0.2"

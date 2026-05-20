@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,7 +7,7 @@ use alloy::consensus::Transaction as ConsensusTx;
 use alloy::eips::BlockNumberOrTag;
 use alloy::network::TransactionResponse;
 use alloy::providers::ext::DebugApi;
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::rpc::types::trace::geth::{GethDebugTracingOptions, GethTrace};
 use backoff::ExponentialBackoffBuilder;
 use bigdecimal::BigDecimal;
@@ -45,16 +46,33 @@ impl WorkerPool {
 
     /// 지정된 블록 범위를 인덱싱한다.
     ///
-    /// 블록 범위를 `batch_size` 단위 청크로 분할하고,
-    /// `tokio::JoinSet`으로 병렬 수집한다.
-    #[tracing::instrument(skip(self))]
-    pub async fn index_range(&self, from_block: u64, to_block: u64) -> anyhow::Result<()> {
+    /// 블록 범위를 `batch_size` 단위 청크로 분할하고, `tokio::JoinSet`으로 병렬
+    /// 수집한다. 청크 사이마다 `cancel` 플래그를 확인해 ctrl_c 등 외부 신호에
+    /// **청크 경계에서** 정상 종료한다(HARDEN-T01/R4). 체크포인트는 청크 단위로
+    /// 박혀 있어 조기 종료해도 부분 진행이 보존된다. 취소가 필요 없는 호출자는
+    /// `&AtomicBool::new(false)`를 넘기면 종래 동작과 동일.
+    #[tracing::instrument(skip(self, cancel))]
+    pub async fn index_range(
+        &self,
+        from_block: u64,
+        to_block: u64,
+        cancel: &AtomicBool,
+    ) -> anyhow::Result<()> {
         tracing::info!(from_block, to_block, "starting block range indexing");
 
         let total = to_block.saturating_sub(from_block) + 1;
         let mut processed = 0u64;
 
         for chunk_start in (from_block..=to_block).step_by(self.batch_size) {
+            if cancel.load(Ordering::Relaxed) {
+                tracing::info!(
+                    from_block,
+                    to_block,
+                    processed,
+                    "cancellation requested — stopping index_range at chunk boundary"
+                );
+                return Ok(());
+            }
             let chunk_end = (chunk_start + self.batch_size as u64 - 1).min(to_block);
             self.process_chunk(chunk_start, chunk_end).await?;
 
@@ -67,6 +85,223 @@ impl WorkerPool {
 
         tracing::info!(total_blocks = total, "indexing complete");
         Ok(())
+    }
+
+    /// 체인 헤드를 따라가며 연속 인덱싱한다.
+    ///
+    /// `head - confirmations`까지만 인덱싱(얕은 reorg 완화, D009).
+    /// `ctrl_c` 수신 시 진행 중 작업을 마치고 graceful 종료한다.
+    pub async fn follow(
+        &self,
+        confirmations: u64,
+        poll: Duration,
+        trigger: TriggerMode,
+    ) -> anyhow::Result<()> {
+        let provider = ProviderBuilder::new().connect_http(
+            self.rpc_url
+                .parse()
+                .map_err(|e| anyhow::anyhow!("invalid RPC URL: {e}"))?,
+        );
+        tracing::info!(
+            confirmations,
+            poll_secs = poll.as_secs(),
+            trigger = trigger.label(),
+            "follow mode started (Ctrl-C to stop)"
+        );
+
+        let mut m = FollowMetrics::default();
+
+        // Cancellation watcher (HARDEN-T01/R4): ctrl_c가 도착하면 공유 flag를
+        // 켠다. `index_range`가 청크 사이에서 이 flag를 확인해 거대한 백필
+        // 사이클이라도 빠르게 graceful 종료. wait phase의 `tokio::select!`는
+        // 종전대로 사이클 사이의 즉시 종료를 따로 처리한다(중복 안전).
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let cancel = Arc::clone(&cancel);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                cancel.store(true, Ordering::Relaxed);
+            });
+        }
+
+        // 트리거: 구독 모드면 newHeads 틱 채널을 띄운다. 연결/구독 실패나
+        // 스트림 종료 시 채널이 닫혀 자동으로 폴링으로 폴백한다(무회귀, D011).
+        let mut ws_rx = match &trigger {
+            TriggerMode::Subscribe(ws_url) => Some(spawn_head_ticks(ws_url.clone())),
+            TriggerMode::Polling => None,
+        };
+
+        loop {
+            m.cycle += 1;
+
+            // reorg 체크가 우선 — fork면 롤백 후 재인덱싱(되감긴 checkpoint).
+            // 불확실(RPC 실패/블록 부재)이면 detect_fork가 None → 무작동(안전).
+            if let Some(fork) = self.detect_fork(&provider, REORG_SCAN_CAP).await? {
+                tracing::warn!(cycle = m.cycle, fork, "reorg detected — rolling back");
+                let rolled = db::queries::rollback_from_block(&self.db_pool, fork as i64).await?;
+                m.reorgs += 1;
+                m.last_reorg_depth = rolled;
+                tracing::warn!(
+                    cycle = m.cycle,
+                    fork,
+                    depth = rolled,
+                    reorgs_total = m.reorgs,
+                    "rolled back — re-indexing next cycle"
+                );
+                continue;
+            }
+
+            let head = rpc_with_retry(|| async {
+                provider
+                    .get_block_number()
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))
+            })
+            .await?;
+
+            let checkpoint = db::queries::get_last_checkpoint(&self.db_pool, 1).await?;
+            let mut indexed_this_cycle = 0u64;
+            match next_target(head, confirmations, checkpoint) {
+                Some((from, to)) => {
+                    // 사이클당 범위 cap(HARDEN-T01/R3) — 거대한 lag에서도 reorg
+                    // 체크가 자주 돌고 ctrl_c 응답성 유지. 잔여는 다음 사이클.
+                    let (from_c, to_c) = cap_range_to(from, to, FOLLOW_CYCLE_BLOCK_CAP);
+                    let capped = to_c < to;
+                    tracing::info!(
+                        head,
+                        from = from_c,
+                        to = to_c,
+                        capped,
+                        "following: indexing new range"
+                    );
+                    self.index_range(from_c, to_c, cancel.as_ref()).await?;
+                    indexed_this_cycle = (to_c - from_c) + 1;
+                    m.blocks_indexed += indexed_this_cycle;
+                }
+                None => tracing::debug!(head, "following: no new confirmed blocks"),
+            }
+
+            // 인덱싱 중 ctrl_c가 들어왔으면 wait phase 없이 즉시 종료(R4).
+            if cancel.load(Ordering::Relaxed) {
+                tracing::info!("cancellation observed — stopping follow loop");
+                break;
+            }
+
+            // 사이클당 구조화 관측 1줄: lag·처리량·reorg·마지막 폴 시각.
+            // (관측 전용 — 분기/타이밍/IO 불변)
+            let now = chrono::Utc::now();
+            let lag = checkpoint
+                .map(|c| head.saturating_sub(c.max(0) as u64))
+                .unwrap_or(0);
+            tracing::info!(
+                cycle = m.cycle,
+                head,
+                checkpoint = checkpoint.unwrap_or(-1),
+                lag,
+                indexed_this_cycle,
+                blocks_total = m.blocks_indexed,
+                reorgs_total = m.reorgs,
+                last_reorg_depth = m.last_reorg_depth,
+                last_poll = %now,
+                "follow cycle summary"
+            );
+
+            // 다음 사이클 트리거: 구독이면 newHeads 틱, 아니면 sleep(poll).
+            // ctrl_c는 항상 레이스(graceful 종료). 채널이 닫히면 폴링 폴백.
+            let mut fall_back = false;
+            match ws_rx.as_mut() {
+                Some(rx) => {
+                    tokio::select! {
+                        tick = rx.recv() => {
+                            if tick.is_none() {
+                                tracing::warn!(
+                                    "newHeads channel closed — falling back to polling"
+                                );
+                                fall_back = true;
+                            }
+                        }
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Ctrl-C received — stopping follow loop");
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(poll) => {}
+                        _ = tokio::signal::ctrl_c() => {
+                            tracing::info!("Ctrl-C received — stopping follow loop");
+                            break;
+                        }
+                    }
+                }
+            }
+            if fall_back {
+                ws_rx = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// 최근 로컬 블록 해시를 체인과 대조해 reorg fork point를 찾는다.
+    ///
+    /// **lazy + 동적 확대** (R1/R2): tip부터 필요한 만큼만 체인 해시를 조회한다 —
+    /// 정상(tip 일치) 시 RPC 1회로 단락(R2). 윈도우 전체 불일치면 cap
+    /// (`REORG_SCAN_CAP`)까지 [`next_scan_depth`]로 배수 확대해 **진짜 최소
+    /// 공통조상**을 찾는다(R1: under-delete 갭 해소). 순수 판정은
+    /// [`classify_fork`]/[`next_scan_depth`]; 여기선 비동기 조회만 담당.
+    ///
+    /// RPC 조회 불가/블록 부재(불확실)면 `None` — 파괴적 롤백 false positive
+    /// 방지(안전 규칙 불변).
+    async fn detect_fork(&self, provider: &impl Provider, cap: i64) -> anyhow::Result<Option<u64>> {
+        let local: Vec<(u64, String)> = db::queries::recent_block_hashes(&self.db_pool, cap)
+            .await?
+            .into_iter()
+            .map(|(n, h)| (n as u64, h))
+            .collect();
+        if local.is_empty() {
+            return Ok(None);
+        }
+        let len = local.len();
+
+        let mut chain: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+        let mut depth = 1usize;
+        loop {
+            // 깊이 [0,depth) 중 미조회분만 lazy fetch (tip 일치면 1회로 끝 — R2)
+            for (height, _) in &local[..depth.min(len)] {
+                let h = *height;
+                if chain.contains_key(&h) {
+                    continue;
+                }
+                let fetched = rpc_with_retry(|| async {
+                    provider
+                        .get_block_by_number(BlockNumberOrTag::Number(h))
+                        .await
+                        .map_err(|e| anyhow::anyhow!(e))
+                })
+                .await;
+                match fetched {
+                    Ok(Some(block)) => {
+                        chain.insert(h, format!("0x{:x}", block.header.hash));
+                    }
+                    // 블록 부재(헤드 밖) 또는 RPC 실패 → 불확실: 무롤백(안전)
+                    Ok(None) | Err(_) => return Ok(None),
+                }
+            }
+
+            match classify_fork(&local, |h| chain.get(&h).cloned(), depth) {
+                ForkScan::NoReorg | ForkScan::Inconclusive => return Ok(None),
+                ForkScan::Fork(f) => return Ok(Some(f)),
+                ForkScan::NeedDeeper => {
+                    let next = next_scan_depth(depth, len);
+                    if next == depth {
+                        // NeedDeeper면 depth<len이라 논리상 도달 불가 — 안전망
+                        return Ok(Some(local[len - 1].0));
+                    }
+                    depth = next;
+                }
+            }
+        }
     }
 
     /// 단일 블록 청크를 처리한다.
@@ -139,6 +374,8 @@ impl WorkerPool {
             block_number: block_number as i64,
             timestamp,
             gas_used: block.header.gas_used as i64,
+            block_hash: Some(format!("0x{:x}", block.header.hash)),
+            parent_hash: Some(format!("0x{:x}", block.header.parent_hash)),
         };
         db::queries::insert_blocks(db_pool, &[block_model]).await?;
 
@@ -458,4 +695,417 @@ where
         f().await.map_err(backoff::Error::transient)
     })
     .await
+}
+
+/// follow 루프의 누적 관측 카운터.
+///
+/// 경량(프로세스 메모리)·신규 의존성 없음 — 값은 `tracing` 필드로만 방출한다.
+/// 동작/타이밍/IO에 영향 없음(관측 전용).
+#[derive(Default)]
+struct FollowMetrics {
+    /// 루프 반복 횟수(1부터)
+    cycle: u64,
+    /// 누적 인덱싱 블록 수
+    blocks_indexed: u64,
+    /// 누적 reorg 발생 횟수
+    reorgs: u64,
+    /// 최근 reorg에서 롤백된 블록 수(깊이). 발생 전이면 0
+    last_reorg_depth: u64,
+}
+
+/// 한 사이클에 인덱싱할 범위를 cap에 맞춰 자른다(HARDEN-T01/R3, 순수).
+///
+/// `to - from + 1 ≤ cap_blocks` 이면 원본 그대로, 아니면 `(from, from+cap-1)`.
+/// `cap_blocks == 0` 또는 `to < from` 이면 자르지 않음(no-op). `u64` 산술은
+/// saturating으로 처리해 tip 부근 오버플로 안전.
+pub fn cap_range_to(from: u64, to: u64, cap_blocks: u64) -> (u64, u64) {
+    if cap_blocks == 0 || to < from {
+        return (from, to);
+    }
+    let span = to.saturating_sub(from).saturating_add(1);
+    if span <= cap_blocks {
+        return (from, to);
+    }
+    let capped_to = from.saturating_add(cap_blocks).saturating_sub(1);
+    (from, capped_to)
+}
+
+/// follow 루프의 순수 결정 함수 — 다음에 인덱싱할 블록 범위.
+///
+/// `safe = head - confirmations` (얕은 reorg 완화, D009). 체크포인트가 있으면
+/// 그 다음 블록부터, 없으면 tip(`safe`)부터 시작한다(follow는 전체 백필을 하지
+/// 않는다). 새로 인덱싱할 확정 블록이 없으면 `None`.
+pub fn next_target(
+    head: u64,
+    confirmations: u64,
+    last_checkpoint: Option<i64>,
+) -> Option<(u64, u64)> {
+    let safe = head.saturating_sub(confirmations);
+    let resume = match last_checkpoint {
+        Some(c) => (c.max(0) as u64).saturating_add(1),
+        None => safe,
+    };
+    if resume > safe {
+        None
+    } else {
+        Some((resume, safe))
+    }
+}
+
+/// reorg fork 탐색의 최대 깊이(cap). 윈도우 전체 불일치 시 여기까지 배수 확대해
+/// 진짜 최소 공통조상을 찾는다(R1: under-delete 갭 해소). ≈4096블록(메인넷
+/// 약 13.6h) — PoS finality(≈64)의 64배 마진. 로컬(자체 DB)은 한 번에 로드해도
+/// 저렴하고, 체인 해시는 lazy 조회라 정상 시 RPC 비용은 cap과 무관(R2).
+pub const REORG_SCAN_CAP: i64 = 4096;
+
+/// follow 한 사이클이 한번에 인덱싱할 수 있는 블록 수 상한 (HARDEN-T01/R3).
+///
+/// 큰 lag에서 체크포인트가 한참 뒤처진 상태로 follow를 시작하면 `next_target`이
+/// 거대한 범위를 반환해 `index_range`가 길게 도는 동안 ① reorg 체크가 지연되고
+/// ② ctrl_c 응답성도 떨어진다. 사이클당 이 cap만큼만 처리하고 다음 사이클로
+/// 넘겨 head 재조회·reorg 재검사 + 조기 graceful 종료 여유를 만든다. cap을
+/// 넘는 범위는 자연스레 후속 사이클에서 이어 처리된다.
+pub const FOLLOW_CYCLE_BLOCK_CAP: u64 = 500;
+
+/// [`classify_fork`]의 판정 결과.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ForkScan {
+    /// tip부터 일치 — reorg 없음
+    NoReorg,
+    /// 높이 `f`부터(포함) 무효 → `rollback_from_block(f)`
+    Fork(u64),
+    /// 필요한 체인 해시 부재(불확실) — 안전 규칙: 무롤백
+    Inconclusive,
+    /// 본 깊이 전부 불일치 & 더 깊은 로컬 존재 → 호출자가 윈도우 확대
+    NeedDeeper,
+}
+
+/// reorg fork point를 찾는 **순수** 함수 — tip부터 `depth`개만 본다(lazy).
+///
+/// `local`은 (블록번호, 로컬해시)를 **번호 내림차순(tip 먼저)** 연속 구간으로
+/// 받는다. `chain_hash_at`는 해당 높이의 체인 해시(`None`=조회 불가).
+///
+/// - tip 일치 → [`ForkScan::NoReorg`] (정상 시 체인 조회 1회로 단락 — R2)
+/// - 불일치 후 일치 만남 → [`ForkScan::Fork`]`(최저 불일치 높이)` (정확 롤백)
+/// - 체인 해시 `None` → [`ForkScan::Inconclusive`] (안전 규칙: 무롤백)
+/// - `depth`까지 전부 불일치 & 로컬이 더 있음 → [`ForkScan::NeedDeeper`]
+///   (호출자가 [`next_scan_depth`]로 확대); 더 없으면 최저 로컬을 `Fork`(R1)
+pub fn classify_fork(
+    local: &[(u64, String)],
+    chain_hash_at: impl Fn(u64) -> Option<String>,
+    depth: usize,
+) -> ForkScan {
+    let n = depth.min(local.len());
+    if n == 0 {
+        return ForkScan::NoReorg;
+    }
+    let mut last_mismatch: Option<u64> = None;
+    for (height, local_hash) in &local[..n] {
+        match chain_hash_at(*height) {
+            // 불확실 → 파괴적 롤백보다 이번 사이클 스킵이 안전
+            None => return ForkScan::Inconclusive,
+            Some(chain_hash) if &chain_hash == local_hash => {
+                // 일치: 이 높이 이하는 정상(체인 연결성)
+                return match last_mismatch {
+                    Some(f) => ForkScan::Fork(f),
+                    None => ForkScan::NoReorg,
+                };
+            }
+            Some(_) => last_mismatch = Some(*height), // 불일치(계속 하강)
+        }
+    }
+    // [0,n) 전부 불일치
+    if n < local.len() {
+        ForkScan::NeedDeeper
+    } else {
+        // 더 깊은 로컬 없음 → 최선의 floor(= 최저 로컬 높이). cap이 커서 잔여
+        // 갭은 사실상 0이나, 도달 시 정직하게 best-effort 롤백.
+        match last_mismatch {
+            Some(f) => ForkScan::Fork(f),
+            None => ForkScan::NoReorg,
+        }
+    }
+}
+
+/// 윈도우 확대 폭(순수): 현재 깊이를 ×4로 키우되 `max`로 클램프, 항상 전진
+/// (`> current`)하도록 보장 → 종료성. `current >= max`면 `max`.
+pub fn next_scan_depth(current: usize, max: usize) -> usize {
+    if current >= max {
+        return max;
+    }
+    current.saturating_mul(4).clamp(current + 1, max)
+}
+
+/// follow 사이클을 무엇이 깨우는지(트리거)를 나타낸다.
+///
+/// 폴링이 기본, 구독은 옵트인(D011). `Subscribe`는 (트림된) WS URL을 담는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TriggerMode {
+    /// `sleep(poll)`로 사이클을 깨운다(기본, 호환성 안전값).
+    Polling,
+    /// newHeads 구독으로 사이클을 깨운다. 내부 문자열 = WS 엔드포인트.
+    Subscribe(String),
+}
+
+impl TriggerMode {
+    /// 로그용 모드 라벨. **WS URL(시크릿 가능)은 절대 노출하지 않는다.**
+    pub fn label(&self) -> &'static str {
+        match self {
+            TriggerMode::Polling => "polling",
+            TriggerMode::Subscribe(_) => "subscribe",
+        }
+    }
+}
+
+/// `--subscribe`와 `WS_URL`에서 트리거 모드를 결정하는 순수 함수.
+///
+/// 구독을 요청(`subscribe=true`)했고 `ws_url`이 공백이 아닐 때만
+/// `Subscribe(트림된 URL)`. 그 외엔 `Polling`으로 **폴백**한다 — WS 미지정/공백은
+/// 회귀가 아니라 정상 기본값(D011). RPC/WS 없이 단위테스트 가능.
+pub fn resolve_trigger_mode(subscribe: bool, ws_url: Option<&str>) -> TriggerMode {
+    match (subscribe, ws_url.map(str::trim)) {
+        (true, Some(u)) if !u.is_empty() => TriggerMode::Subscribe(u.to_string()),
+        _ => TriggerMode::Polling,
+    }
+}
+
+/// newHeads 구독을 백그라운드에서 돌리며 새 헤드마다 사이클 틱을 보낸다.
+///
+/// WS 연결/구독 실패나 스트림 종료 시 태스크가 끝나 채널이 닫히고, 호출자는
+/// 자동으로 폴링으로 폴백한다(무회귀, D011). 연결을 수명 동안 살리기 위해
+/// provider를 이 태스크가 소유한다. **WS URL은 로그에 찍지 않는다(시크릿 가능).**
+fn spawn_head_ticks(ws_url: String) -> tokio::sync::mpsc::Receiver<()> {
+    let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(async move {
+        let provider = match ProviderBuilder::new()
+            .connect_ws(WsConnect::new(ws_url))
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(error = %e, "WS connect failed — falling back to polling");
+                return;
+            }
+        };
+        let mut sub = match provider.subscribe_blocks().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "newHeads subscribe failed — falling back to polling");
+                return;
+            }
+        };
+        tracing::info!("subscribe mode: newHeads subscription active");
+        loop {
+            match sub.recv().await {
+                Ok(_) => {
+                    // 수신자(follow 루프) 종료 시 send 실패 → 태스크 정리
+                    if tx.send(()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "newHeads stream ended — falling back to polling");
+                    break;
+                }
+            }
+        }
+    });
+    rx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        cap_range_to, classify_fork, next_scan_depth, next_target, resolve_trigger_mode, ForkScan,
+        TriggerMode,
+    };
+
+    fn h(s: &str) -> String {
+        s.to_string()
+    }
+
+    #[test]
+    fn no_checkpoint_starts_at_safe_tip() {
+        // 백필 방지: 체크포인트 없으면 tip(head-conf)부터
+        assert_eq!(next_target(100, 12, None), Some((88, 88)));
+    }
+
+    #[test]
+    fn resumes_from_checkpoint_plus_one() {
+        assert_eq!(next_target(100, 12, Some(50)), Some((51, 88)));
+    }
+
+    #[test]
+    fn nothing_new_when_caught_up() {
+        // 체크포인트가 이미 safe head에 도달 → None
+        assert_eq!(next_target(100, 12, Some(88)), None);
+        assert_eq!(next_target(100, 12, Some(200)), None);
+    }
+
+    #[test]
+    fn boundary_one_block_behind() {
+        assert_eq!(next_target(100, 12, Some(87)), Some((88, 88)));
+    }
+
+    #[test]
+    fn head_below_confirmations_saturates_to_zero() {
+        assert_eq!(next_target(5, 12, None), Some((0, 0)));
+        assert_eq!(next_target(5, 12, Some(0)), None);
+    }
+
+    #[test]
+    fn classify_no_reorg_when_tip_matches() {
+        let local = [(100u64, h("a100")), (99, h("a99"))];
+        let chain = |n: u64| Some(format!("a{n}"));
+        // tip 일치 → depth=1로 즉시 NoReorg (R2: 체인 조회 최소)
+        assert_eq!(classify_fork(&local, chain, 1), ForkScan::NoReorg);
+    }
+
+    #[test]
+    fn classify_fork_tip_only() {
+        let local = [(100u64, h("old100")), (99, h("a99"))];
+        let chain = |n: u64| {
+            Some(if n == 100 {
+                h("new100")
+            } else {
+                format!("a{n}")
+            })
+        };
+        assert_eq!(classify_fork(&local, chain, 2), ForkScan::Fork(100));
+    }
+
+    #[test]
+    fn classify_fork_deeper_returns_lowest_invalid() {
+        // 100,99 reorged; 98 matches → fork = 99
+        let local = [(100u64, h("o100")), (99, h("o99")), (98, h("a98"))];
+        let chain = |n: u64| {
+            Some(if n >= 99 {
+                format!("new{n}")
+            } else {
+                format!("a{n}")
+            })
+        };
+        assert_eq!(classify_fork(&local, chain, 3), ForkScan::Fork(99));
+    }
+
+    #[test]
+    fn classify_need_deeper_then_floor_when_all_mismatch() {
+        // 본 깊이 전부 불일치 + 더 깊은 로컬 존재 → 확대 요청 (R1)
+        let local = [(100u64, h("o100")), (99, h("o99")), (98, h("o98"))];
+        let chain = |n: u64| Some(format!("new{n}"));
+        assert_eq!(classify_fork(&local, &chain, 2), ForkScan::NeedDeeper);
+        // 전부 봤는데(더 깊은 로컬 없음) 다 불일치 → best-effort 최저 floor
+        assert_eq!(classify_fork(&local, &chain, 3), ForkScan::Fork(98));
+    }
+
+    #[test]
+    fn classify_inconclusive_is_safe() {
+        let local = [(100u64, h("o100")), (99, h("o99"))];
+        // 체인 조회 불가 → 절대 롤백 단정 금지(안전 규칙 불변)
+        assert_eq!(classify_fork(&local, |_| None, 2), ForkScan::Inconclusive);
+    }
+
+    #[test]
+    fn classify_empty_local_is_no_reorg() {
+        assert_eq!(classify_fork(&[], |_| Some(h("x")), 8), ForkScan::NoReorg);
+    }
+
+    #[test]
+    fn cap_range_to_smaller_than_cap_returns_full() {
+        assert_eq!(cap_range_to(100, 200, 500), (100, 200));
+    }
+
+    #[test]
+    fn cap_range_to_equal_cap_returns_full() {
+        // 정확히 cap(500블록)일 때는 자르지 않음
+        assert_eq!(cap_range_to(100, 599, 500), (100, 599));
+    }
+
+    #[test]
+    fn cap_range_to_larger_than_cap_truncates() {
+        assert_eq!(cap_range_to(100, 5000, 500), (100, 599));
+    }
+
+    #[test]
+    fn cap_range_to_single_block() {
+        assert_eq!(cap_range_to(100, 100, 500), (100, 100));
+    }
+
+    #[test]
+    fn cap_range_to_cap_zero_is_noop() {
+        // cap_blocks == 0 → 자르지 않음(테스트/특수 호출자용 탈출구)
+        assert_eq!(cap_range_to(100, 5000, 0), (100, 5000));
+    }
+
+    #[test]
+    fn cap_range_to_saturating_near_u64_max() {
+        // tip 부근 산술 안전성 — saturating로 오버플로 방지
+        let from = u64::MAX - 2;
+        let to = u64::MAX;
+        assert_eq!(cap_range_to(from, to, 500), (from, to));
+    }
+
+    #[test]
+    fn next_scan_depth_widens_multiplicatively_and_terminates() {
+        // ×4 전진, max 클램프, 항상 증가 → 종료성
+        assert_eq!(next_scan_depth(1, 4096), 4);
+        assert_eq!(next_scan_depth(4, 4096), 16);
+        assert_eq!(next_scan_depth(16, 4096), 64);
+        assert_eq!(next_scan_depth(1024, 4096), 4096);
+        assert_eq!(next_scan_depth(2000, 4096), 4096); // 8000 → 클램프
+        assert_eq!(next_scan_depth(4096, 4096), 4096); // 이미 max
+        assert_eq!(next_scan_depth(3, 4), 4); // 경계: 항상 전진
+        assert_eq!(next_scan_depth(1, 1), 1);
+    }
+
+    #[test]
+    fn trigger_polling_when_not_requested() {
+        // 구독 미요청이면 WS_URL이 있어도 폴링
+        assert_eq!(
+            resolve_trigger_mode(false, Some("wss://eth")),
+            TriggerMode::Polling
+        );
+    }
+
+    #[test]
+    fn trigger_polling_fallback_when_no_ws() {
+        // 구독 요청했으나 WS 없음 → 폴백(무회귀)
+        assert_eq!(resolve_trigger_mode(true, None), TriggerMode::Polling);
+    }
+
+    #[test]
+    fn trigger_polling_when_ws_blank() {
+        // 공백/whitespace는 미지정과 동치
+        assert_eq!(resolve_trigger_mode(true, Some("")), TriggerMode::Polling);
+        assert_eq!(
+            resolve_trigger_mode(true, Some("   ")),
+            TriggerMode::Polling
+        );
+    }
+
+    #[test]
+    fn trigger_subscribe_when_requested_and_ws_present() {
+        assert_eq!(
+            resolve_trigger_mode(true, Some("wss://eth")),
+            TriggerMode::Subscribe("wss://eth".to_string())
+        );
+    }
+
+    #[test]
+    fn trigger_subscribe_trims_url() {
+        assert_eq!(
+            resolve_trigger_mode(true, Some("  wss://eth  ")),
+            TriggerMode::Subscribe("wss://eth".to_string())
+        );
+    }
+
+    #[test]
+    fn trigger_label_never_leaks_url() {
+        // 라벨은 모드만 — WS URL(시크릿 가능) 비노출
+        assert_eq!(TriggerMode::Polling.label(), "polling");
+        assert_eq!(
+            TriggerMode::Subscribe("wss://secret-key@host".to_string()).label(),
+            "subscribe"
+        );
+    }
 }

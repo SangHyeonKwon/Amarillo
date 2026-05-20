@@ -18,6 +18,59 @@ pub enum ErrorCategory {
     Unknown,
 }
 
+impl std::str::FromStr for ErrorCategory {
+    type Err = ();
+
+    /// 와이어 표현(SCREAMING_SNAKE_CASE) 문자열을 파싱한다.
+    ///
+    /// API 쿼리 파라미터 → 타입 변환의 단일 출처. 알 수 없는 값은 `Err(())`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "INSUFFICIENT_BALANCE" => Ok(Self::InsufficientBalance),
+            "SLIPPAGE_EXCEEDED" => Ok(Self::SlippageExceeded),
+            "DEADLINE_EXPIRED" => Ok(Self::DeadlineExpired),
+            "UNAUTHORIZED" => Ok(Self::Unauthorized),
+            "TRANSFER_FAILED" => Ok(Self::TransferFailed),
+            "UNKNOWN" => Ok(Self::Unknown),
+            _ => Err(()),
+        }
+    }
+}
+
+/// 시계열 버킷 단위 — `date_trunc`에 쓰일 화이트리스트(인젝션 방지).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TimeBucket {
+    Hour,
+    Day,
+    Week,
+}
+
+impl TimeBucket {
+    /// `date_trunc` 1번째 인자에 **바인딩**할 고정 텍스트 (사용자 입력 보간 아님).
+    pub fn as_pg(&self) -> &'static str {
+        match self {
+            Self::Hour => "hour",
+            Self::Day => "day",
+            Self::Week => "week",
+        }
+    }
+}
+
+impl std::str::FromStr for TimeBucket {
+    type Err = ();
+
+    /// `hour|day|week` 파싱. 알 수 없는 값은 `Err(())` (API에서 400).
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "hour" => Ok(Self::Hour),
+            "day" => Ok(Self::Day),
+            "week" => Ok(Self::Week),
+            _ => Err(()),
+        }
+    }
+}
+
 /// 유동성 이벤트 타입 (Mint 또는 Burn).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::Type)]
 #[sqlx(
@@ -60,6 +113,10 @@ pub struct Block {
     pub timestamp: DateTime<Utc>,
     /// 블록에서 사용된 총 가스
     pub gas_used: i64,
+    /// 블록 해시 (reorg 감지용; S06 이전 행은 NULL)
+    pub block_hash: Option<String>,
+    /// 부모 블록 해시 (fork point 탐지용; S06 이전 행은 NULL)
+    pub parent_hash: Option<String>,
 }
 
 /// ERC-20 토큰 메타데이터.
@@ -359,4 +416,84 @@ pub struct PoolStats {
     pub liquidity_events: i64,
     /// 추정 수수료 수익
     pub estimated_fees: BigDecimal,
+}
+
+/// 단건 실패 트랜잭션 진단 결과.
+///
+/// API 조립용 합성 구조체 — 테이블/뷰가 아니다. `failed_transaction` 1행과
+/// 해당 tx의 평탄화된 `trace_log` 콜트리(1:N)를 함께 담는다.
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedTxDetail {
+    /// 실패 트랜잭션 메타 + 분류 결과
+    pub failed: FailedTransaction,
+    /// 평탄화된 콜 프레임 (`trace_id` 오름차순 = pre-order DFS)
+    pub call_tree: Vec<TraceLog>,
+    /// `call_tree`가 상한에서 잘렸으면 `true` (부분 응답 신호)
+    pub call_tree_truncated: bool,
+}
+
+/// 실패 추이 시계열의 한 점 (failed_tx_timeseries).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct FailedTxTrendPoint {
+    /// 버킷 시작 시각 (`date_trunc` 결과)
+    pub bucket: DateTime<Utc>,
+    /// 에러 카테고리
+    pub error_category: ErrorCategory,
+    /// 해당 버킷·카테고리의 실패 건수
+    pub failure_count: i64,
+}
+
+/// 실패 패턴 알림 구독 (alert_subscription).
+///
+/// `signing_secret`은 생성 응답([`AlertSubscriptionCreated`])에서 **1회만** 노출
+/// 하고, 목록 직렬화에선 `#[serde(skip_serializing)]`로 제외한다(시크릿).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct AlertSubscription {
+    /// 구독 ID (PK)
+    pub subscription_id: i64,
+    /// 매칭할 에러 카테고리 (None = 모든 카테고리)
+    pub error_category: Option<ErrorCategory>,
+    /// 매칭할 컨트랙트 주소(소문자) (None = 모든 주소)
+    pub to_addr: Option<String>,
+    /// 알림을 POST 할 webhook URL
+    pub webhook_url: String,
+    /// per-구독 HMAC-SHA256 키 — 로그/목록 응답에 노출 금지
+    #[serde(skip_serializing)]
+    pub signing_secret: String,
+    /// 활성 여부
+    pub active: bool,
+    /// 생성 시각
+    pub created_at: DateTime<Utc>,
+}
+
+/// 구독 생성(POST) 응답 — `signing_secret`을 **이때 한 번만** 반환한다.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertSubscriptionCreated {
+    /// 구독 ID (PK)
+    pub subscription_id: i64,
+    /// 매칭 에러 카테고리 (None = 모든 카테고리)
+    pub error_category: Option<ErrorCategory>,
+    /// 매칭 컨트랙트 주소(소문자) (None = 모든 주소)
+    pub to_addr: Option<String>,
+    /// 알림 webhook URL
+    pub webhook_url: String,
+    /// HMAC 서명 키 — 생성 직후 **1회만** 노출(이후 조회 불가)
+    pub signing_secret: String,
+    /// 활성 여부
+    pub active: bool,
+    /// 생성 시각
+    pub created_at: DateTime<Utc>,
+}
+
+/// 디스패처가 전송할 (구독 × 미전송 실패 tx) 매칭 1건. 내부용(직렬화 안 함).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct AlertMatch {
+    /// 대상 구독 ID
+    pub subscription_id: i64,
+    /// 매칭된 실패 tx 해시
+    pub tx_hash: String,
+    /// 전송 대상 webhook URL
+    pub webhook_url: String,
+    /// 본문 서명용 HMAC 키
+    pub signing_secret: String,
 }

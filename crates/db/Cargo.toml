@@ -8,6 +8,7 @@ description = "SQLx-based database layer for DeFi Analytics (Uniswap V3)"
 
 [dependencies]
 sqlx.workspace = true
+url.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -15,3 +16,10 @@ tracing.workspace = true
 bigdecimal.workspace = true
 chrono.workspace = true
 tokio.workspace = true
+
+[dev-dependencies]
+# Integration tests live in their own crate and do not inherit the normal
+# deps above, so the runtime + time types must be declared here too.
+tokio = { workspace = true }
+chrono = { workspace = true }
+bigdecimal = { workspace = true }

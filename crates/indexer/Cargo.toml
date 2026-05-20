@@ -27,3 +27,8 @@ bigdecimal.workspace = true
 hex.workspace = true
 backoff.workspace = true
 clap.workspace = true
+
+# Alerts dispatcher (S08)
+reqwest.workspace = true
+hmac.workspace = true
+sha2.workspace = true

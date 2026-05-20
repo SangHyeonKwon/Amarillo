@@ -1,5 +1,7 @@
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM rust:1.86-slim-bookworm AS builder
+# home@0.5.12 (transitive, via alloy) requires rustc >= 1.88; pin to a
+# recent stable with margin.
+FROM rust:1.90-slim-bookworm AS builder
 
 WORKDIR /app
 

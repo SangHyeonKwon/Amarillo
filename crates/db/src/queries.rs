@@ -3,9 +3,10 @@ use sqlx::PgPool;
 
 use crate::error::DbError;
 use crate::models::{
-    Block, DailySwapVolume, ErrorCategory, FailedTransaction, FailedTxAnalysis, LiquidityEvent,
-    LiquidityEventType, Pool, PoolStats, PriceSnapshot, SnapshotInterval, SwapEvent, Token,
-    TokenTransfer, TopTrader, TraceLog, Transaction, UserProfile,
+    AlertMatch, AlertSubscription, Block, DailySwapVolume, ErrorCategory, FailedTransaction,
+    FailedTxAnalysis, FailedTxTrendPoint, LiquidityEvent, LiquidityEventType, Pool, PoolStats,
+    PriceSnapshot, SnapshotInterval, SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader,
+    TraceLog, Transaction, UserProfile,
 };
 
 /// PostgreSQL enum 값으로 변환하는 헬퍼.
@@ -50,15 +51,20 @@ pub async fn insert_blocks(pool: &PgPool, blocks: &[Block]) -> Result<u64, DbErr
     let block_numbers: Vec<i64> = blocks.iter().map(|b| b.block_number).collect();
     let timestamps: Vec<DateTime<Utc>> = blocks.iter().map(|b| b.timestamp).collect();
     let gas_useds: Vec<i64> = blocks.iter().map(|b| b.gas_used).collect();
+    let block_hashes: Vec<Option<&str>> = blocks.iter().map(|b| b.block_hash.as_deref()).collect();
+    let parent_hashes: Vec<Option<&str>> =
+        blocks.iter().map(|b| b.parent_hash.as_deref()).collect();
 
     let result = sqlx::query(
-        "INSERT INTO block (block_number, timestamp, gas_used)
-         SELECT * FROM UNNEST($1::BIGINT[], $2::TIMESTAMPTZ[], $3::BIGINT[])
+        "INSERT INTO block (block_number, timestamp, gas_used, block_hash, parent_hash)
+         SELECT * FROM UNNEST($1::BIGINT[], $2::TIMESTAMPTZ[], $3::BIGINT[], $4::TEXT[], $5::TEXT[])
          ON CONFLICT (block_number) DO NOTHING",
     )
     .bind(&block_numbers)
     .bind(&timestamps)
     .bind(&gas_useds)
+    .bind(&block_hashes)
+    .bind(&parent_hashes)
     .execute(pool)
     .await?;
 
@@ -567,6 +573,140 @@ pub async fn get_failed_tx_analysis(pool: &PgPool) -> Result<Vec<FailedTxAnalysi
     Ok(rows)
 }
 
+/// tx 해시로 단건 실패 트랜잭션을 조회한다.
+///
+/// 해당 해시의 실패 기록이 없으면 [`DbError::NotFound`]를 반환한다.
+#[tracing::instrument(skip(pool))]
+pub async fn get_failed_transaction(
+    pool: &PgPool,
+    tx_hash: &str,
+) -> Result<FailedTransaction, DbError> {
+    sqlx::query_as::<_, FailedTransaction>(
+        "SELECT tx_hash, error_category, revert_reason, failing_function, gas_used, timestamp
+         FROM failed_transaction WHERE tx_hash = $1",
+    )
+    .bind(tx_hash)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| DbError::NotFound(format!("failed transaction {tx_hash}")))
+}
+
+/// tx 해시의 평탄화된 콜 트레이스를 호출 순서(pre-order DFS)대로, 최대 `limit`개 조회한다.
+///
+/// `trace_id`(BIGSERIAL)는 인덱서가 콜트리를 pre-order로 평탄화하며 삽입한
+/// 순서를 그대로 보존하므로, `trace_id ASC` = 올바른 트리 선형순서다.
+/// `call_depth`로 먼저 정렬하면 형제 서브트리가 섞여 트리 복원이 불가능하다.
+/// 호출자는 잘림 감지를 위해 `limit = 상한 + 1`로 조회할 수 있다.
+/// 트레이스가 없으면 빈 `Vec`을 반환한다(에러 아님).
+#[tracing::instrument(skip(pool))]
+pub async fn list_trace_logs_by_tx(
+    pool: &PgPool,
+    tx_hash: &str,
+    limit: i64,
+) -> Result<Vec<TraceLog>, DbError> {
+    let logs = sqlx::query_as::<_, TraceLog>(
+        "SELECT tx_hash, call_depth, call_type, from_addr, to_addr, value,
+                gas_used, input, output, error, trace_id
+         FROM trace_log WHERE tx_hash = $1
+         ORDER BY trace_id ASC
+         LIMIT $2",
+    )
+    .bind(tx_hash)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(logs)
+}
+
+/// 실패 트랜잭션을 필터·페이지네이션하여 조회한다.
+///
+/// `category`/`from`/`to`는 모두 선택 — `None`이면 해당 필터를 적용하지 않는다
+/// (단일 prepared statement, 동적 SQL 미사용). `timestamp DESC` 정렬.
+/// 전체 건수는 [`count_failed_transactions`]로 별도 조회한다.
+#[tracing::instrument(skip(pool))]
+pub async fn list_failed_transactions(
+    pool: &PgPool,
+    category: Option<&ErrorCategory>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    limit: i64,
+    offset: i64,
+) -> Result<Vec<FailedTransaction>, DbError> {
+    let cat = category.map(error_category_to_sql);
+    let rows = sqlx::query_as::<_, FailedTransaction>(
+        "SELECT tx_hash, error_category, revert_reason, failing_function, gas_used, timestamp
+         FROM failed_transaction
+         WHERE ($1::TEXT IS NULL OR error_category = $1::error_category)
+           AND ($2::TIMESTAMPTZ IS NULL OR timestamp >= $2)
+           AND ($3::TIMESTAMPTZ IS NULL OR timestamp <= $3)
+         ORDER BY timestamp DESC
+         LIMIT $4 OFFSET $5",
+    )
+    .bind(cat)
+    .bind(from)
+    .bind(to)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// [`list_failed_transactions`]와 동일 필터의 전체 건수를 반환한다.
+///
+/// 페이지네이션 `total` 메타데이터 산출용 — `LIMIT`/`OFFSET`과 무관하다.
+#[tracing::instrument(skip(pool))]
+pub async fn count_failed_transactions(
+    pool: &PgPool,
+    category: Option<&ErrorCategory>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<i64, DbError> {
+    let cat = category.map(error_category_to_sql);
+    let total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM failed_transaction
+         WHERE ($1::TEXT IS NULL OR error_category = $1::error_category)
+           AND ($2::TIMESTAMPTZ IS NULL OR timestamp >= $2)
+           AND ($3::TIMESTAMPTZ IS NULL OR timestamp <= $3)",
+    )
+    .bind(cat)
+    .bind(from)
+    .bind(to)
+    .fetch_one(pool)
+    .await?;
+    Ok(total)
+}
+
+/// 실패 트랜잭션을 시간 버킷 × 카테고리로 집계한다.
+///
+/// `bucket`은 화이트리스트 [`TimeBucket`]만 받아 `date_trunc($1, timestamp)`에
+/// **바인딩 파라미터**로 전달한다 (문자열 보간 금지 — SQL 인젝션 방지).
+/// `from`/`to`는 선택. `bucket ASC, error_category ASC` 정렬.
+#[tracing::instrument(skip(pool))]
+pub async fn failed_tx_timeseries(
+    pool: &PgPool,
+    bucket: &TimeBucket,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<Vec<FailedTxTrendPoint>, DbError> {
+    let rows = sqlx::query_as::<_, FailedTxTrendPoint>(
+        "SELECT date_trunc($1, timestamp) AS bucket,
+                error_category,
+                COUNT(*) AS failure_count
+         FROM failed_transaction
+         WHERE ($2::TIMESTAMPTZ IS NULL OR timestamp >= $2)
+           AND ($3::TIMESTAMPTZ IS NULL OR timestamp <= $3)
+         GROUP BY 1, 2
+         ORDER BY 1 ASC, 2 ASC",
+    )
+    .bind(bucket.as_pg())
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
 /// 풀 종합 통계를 조회한다 (fn_get_pool_stats).
 #[tracing::instrument(skip(pool))]
 pub async fn get_pool_stats(
@@ -639,6 +779,98 @@ pub async fn get_latest_block_number(pool: &PgPool) -> Result<Option<i64>, DbErr
     Ok(row.map(|r| r.0))
 }
 
+/// 최근 인덱싱된 블록의 `(번호, 해시)`를 번호 내림차순으로 최대 `limit`개 조회한다.
+///
+/// 해시가 없는 행(S06 이전 인덱싱)은 비교 불가이므로 제외한다.
+/// reorg 감지(`detect_fork` → 순수 `classify_fork`)의 로컬 입력용.
+#[tracing::instrument(skip(pool))]
+pub async fn recent_block_hashes(pool: &PgPool, limit: i64) -> Result<Vec<(i64, String)>, DbError> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT block_number, block_hash
+         FROM block
+         WHERE block_hash IS NOT NULL
+         ORDER BY block_number DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// reorg 정정: `from_block`부터(포함) 인덱싱 데이터를 모두 삭제하고 체크포인트를
+/// 되감는다. 단일 트랜잭션·멱등.
+///
+/// tx_hash FK가 `ON DELETE CASCADE`가 아니므로 의존 행 → `transaction` → `block`
+/// 순서로 삭제한다. `price_snapshot`/`user_profile`은 블록 스코프가 아니라 제외.
+/// 재인덱싱은 하지 않는다(follow가 체크포인트에서 재개). 삭제된 block 수를 반환.
+#[tracing::instrument(skip(pool))]
+pub async fn rollback_from_block(pool: &PgPool, from_block: i64) -> Result<u64, DbError> {
+    let resume = (from_block - 1).max(0);
+    let mut tx = pool.begin().await?;
+
+    // 1) tx_hash 의존 행 (transaction 삭제 전 — FK RESTRICT)
+    sqlx::query(
+        "DELETE FROM swap_event
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM liquidity_event
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM token_transfer
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM trace_log
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "DELETE FROM failed_transaction
+         WHERE tx_hash IN (SELECT tx_hash FROM transaction WHERE block_number >= $1)",
+    )
+    .bind(from_block)
+    .execute(&mut *tx)
+    .await?;
+
+    // 2) transaction → block
+    sqlx::query("DELETE FROM transaction WHERE block_number >= $1")
+        .bind(from_block)
+        .execute(&mut *tx)
+        .await?;
+    let blocks = sqlx::query("DELETE FROM block WHERE block_number >= $1")
+        .bind(from_block)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+
+    // 3) 체크포인트 되감기 (follow가 from_block부터 재인덱싱)
+    sqlx::query(
+        "UPDATE indexer_checkpoint
+         SET last_processed_block = $1, updated_at = NOW()
+         WHERE chain_id = 1",
+    )
+    .bind(resume)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(blocks)
+}
+
 /// 특정 블록의 스왑 이벤트를 조회한다.
 #[tracing::instrument(skip(pool))]
 pub async fn get_swap_events_by_block(
@@ -655,4 +887,203 @@ pub async fn get_swap_events_by_block(
     .fetch_all(pool)
     .await?;
     Ok(events)
+}
+
+// ============================================
+// Actionable Alerts (S08) — 구독/매칭/전송 기록
+// ============================================
+
+/// 실패 패턴 구독을 생성하고 생성된 행을 반환한다.
+///
+/// `error_category`는 enum 텍스트 바인딩(`$1::error_category`)으로 안전 전달.
+/// `webhook_url`/`signing_secret`은 호출자(API)가 검증·생성해 넘긴다.
+#[tracing::instrument(skip(pool, signing_secret))]
+pub async fn insert_alert_subscription(
+    pool: &PgPool,
+    error_category: Option<&ErrorCategory>,
+    to_addr: Option<&str>,
+    webhook_url: &str,
+    signing_secret: &str,
+) -> Result<AlertSubscription, DbError> {
+    let cat = error_category.map(error_category_to_sql);
+    let row = sqlx::query_as::<_, AlertSubscription>(
+        "INSERT INTO alert_subscription (error_category, to_addr, webhook_url, signing_secret)
+         VALUES ($1::error_category, $2, $3, $4)
+         RETURNING subscription_id, error_category, to_addr, webhook_url,
+                   signing_secret, active, created_at",
+    )
+    .bind(cat)
+    .bind(to_addr)
+    .bind(webhook_url)
+    .bind(signing_secret)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 구독 목록을 최신순으로 최대 `limit`개 조회한다.
+#[tracing::instrument(skip(pool))]
+pub async fn list_alert_subscriptions(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<AlertSubscription>, DbError> {
+    let rows = sqlx::query_as::<_, AlertSubscription>(
+        "SELECT subscription_id, error_category, to_addr, webhook_url,
+                signing_secret, active, created_at
+         FROM alert_subscription
+         ORDER BY subscription_id DESC
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 구독을 비활성화한다. 영향받은 행 수를 반환한다(0 = 미존재/이미 비활성).
+#[tracing::instrument(skip(pool))]
+pub async fn deactivate_alert_subscription(
+    pool: &PgPool,
+    subscription_id: i64,
+) -> Result<u64, DbError> {
+    let res = sqlx::query(
+        "UPDATE alert_subscription SET active = FALSE
+         WHERE subscription_id = $1 AND active = TRUE",
+    )
+    .bind(subscription_id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}
+
+/// 아직 전송되지 않은 (활성 구독 × 매칭 실패 tx) 쌍을 최대 `limit`개 반환한다.
+///
+/// 매칭: `error_category`/`to_addr`가 NULL이면 해당 조건은 "모두 매칭".
+/// **멱등 anti-join**: `alert_delivery`에서
+/// (a) `status='delivered'` — 영구 제외, 또는
+/// (b) `status='claimed'` 이고 `created_at`이 `stale_after_secs` 이내 — 다른
+///     워커가 현재 처리 중이라 제외(HARDEN-T02). `stale_after_secs`가 지나면
+///     워커가 죽은 것으로 간주, 다시 매칭에 포함 → 재claim 가능.
+/// `status='failed'`는 항상 포함(재시도).
+#[tracing::instrument(skip(pool))]
+pub async fn find_pending_alert_matches(
+    pool: &PgPool,
+    limit: i64,
+    stale_after_secs: i64,
+) -> Result<Vec<AlertMatch>, DbError> {
+    let rows = sqlx::query_as::<_, AlertMatch>(
+        "SELECT s.subscription_id, f.tx_hash, s.webhook_url, s.signing_secret
+         FROM alert_subscription s
+         JOIN failed_transaction f
+           ON (s.error_category IS NULL OR s.error_category = f.error_category)
+         LEFT JOIN transaction t ON t.tx_hash = f.tx_hash
+         WHERE s.active
+           AND (s.to_addr IS NULL OR s.to_addr = t.to_addr)
+           AND NOT EXISTS (
+                 SELECT 1 FROM alert_delivery d
+                 WHERE d.subscription_id = s.subscription_id
+                   AND d.tx_hash = f.tx_hash
+                   AND (d.status = 'delivered'
+                        OR (d.status = 'claimed'
+                            AND d.created_at > NOW() - ($2::int * INTERVAL '1 second')))
+               )
+         ORDER BY f.tx_hash
+         LIMIT $1",
+    )
+    .bind(limit)
+    .bind(stale_after_secs)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 전송 결과를 멱등 기록한다 (PK `(subscription_id, tx_hash)` upsert).
+///
+/// 재시도 시 `attempts`가 누적되고, `delivered`면 `delivered_at`이 한 번 박힌다.
+/// 이 멱등 기록 + [`find_pending_alert_matches`]의 anti-join이 "정확히 1회 전송"을
+/// 보장한다.
+#[tracing::instrument(skip(pool))]
+pub async fn record_alert_delivery(
+    pool: &PgPool,
+    subscription_id: i64,
+    tx_hash: &str,
+    delivered: bool,
+    last_error: Option<&str>,
+) -> Result<(), DbError> {
+    let status = if delivered { "delivered" } else { "failed" };
+    sqlx::query(
+        "INSERT INTO alert_delivery
+             (subscription_id, tx_hash, status, attempts, last_error, delivered_at)
+         VALUES ($1, $2, $3, 1, $4,
+                 CASE WHEN $3 = 'delivered' THEN NOW() ELSE NULL END)
+         ON CONFLICT (subscription_id, tx_hash) DO UPDATE
+             SET status = EXCLUDED.status,
+                 attempts = alert_delivery.attempts + 1,
+                 last_error = EXCLUDED.last_error,
+                 delivered_at = CASE
+                     WHEN EXCLUDED.status = 'delivered' THEN NOW()
+                     ELSE alert_delivery.delivered_at END",
+    )
+    .bind(subscription_id)
+    .bind(tx_hash)
+    .bind(status)
+    .bind(last_error)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 구독을 영구 삭제한다(연관 `alert_delivery`는 FK `ON DELETE CASCADE`로 함께
+/// 삭제). 영향받은 행 수를 반환한다. 보존정책상 완전 삭제·테스트 teardown용.
+#[tracing::instrument(skip(pool))]
+pub async fn delete_alert_subscription(
+    pool: &PgPool,
+    subscription_id: i64,
+) -> Result<u64, DbError> {
+    let res = sqlx::query("DELETE FROM alert_subscription WHERE subscription_id = $1")
+        .bind(subscription_id)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// 한 (구독 × tx) 쌍에 대한 전송 권리를 **원자적으로 claim** 한다 (HARDEN-T02).
+///
+/// `INSERT … ON CONFLICT DO UPDATE WHERE`로 락 없이 한 문장에서 보장한다:
+/// - 새로운 쌍 → 새 'claimed' 행 INSERT → `true`
+/// - 기존 `status='failed'` → 'claimed'로 다시 매겨 재시도 → `true`
+/// - 기존 `status='claimed'` 이고 `created_at < NOW() - stale_after_secs`
+///   (워커가 잡고서 죽은 상황) → 'claimed'로 갱신 → `true`
+/// - 기존 `status='delivered'` 또는 fresh `status='claimed'` (다른 워커 진행 중)
+///   → WHERE 미일치 → 0행 영향 → `false`
+///
+/// PK `(subscription_id, tx_hash)`가 원자성 보장 — 두 워커가 동시에 같은 쌍을
+/// claim 시도해도 정확히 한쪽만 `true`를 받는다. HTTP POST는 락 밖에서 수행.
+#[tracing::instrument(skip(pool))]
+pub async fn try_claim_alert_match(
+    pool: &PgPool,
+    subscription_id: i64,
+    tx_hash: &str,
+    stale_after_secs: i64,
+) -> Result<bool, DbError> {
+    let res = sqlx::query(
+        "INSERT INTO alert_delivery
+             (subscription_id, tx_hash, status, attempts, last_error, delivered_at, created_at)
+         VALUES ($1, $2, 'claimed', 1, NULL, NULL, NOW())
+         ON CONFLICT (subscription_id, tx_hash) DO UPDATE
+             SET status = 'claimed',
+                 attempts = alert_delivery.attempts + 1,
+                 last_error = NULL,
+                 delivered_at = NULL,
+                 created_at = NOW()
+             WHERE alert_delivery.status = 'failed'
+                OR (alert_delivery.status = 'claimed'
+                    AND alert_delivery.created_at < NOW() - ($3::int * INTERVAL '1 second'))",
+    )
+    .bind(subscription_id)
+    .bind(tx_hash)
+    .bind(stale_after_secs)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() == 1)
 }
