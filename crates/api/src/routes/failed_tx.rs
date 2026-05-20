@@ -39,12 +39,14 @@ pub async fn get_failed_tx(
     if call_tree_truncated {
         call_tree.truncate(MAX_CALL_TREE_FRAMES as usize);
     }
+    let root_cause = db::queries::get_first_error_frame(&pool, &tx_hash).await?;
 
     Ok(Json(ApiResponse {
         data: db::models::FailedTxDetail {
             failed,
             call_tree,
             call_tree_truncated,
+            root_cause,
         },
     }))
 }

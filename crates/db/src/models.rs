@@ -421,7 +421,8 @@ pub struct PoolStats {
 /// 단건 실패 트랜잭션 진단 결과.
 ///
 /// API 조립용 합성 구조체 — 테이블/뷰가 아니다. `failed_transaction` 1행과
-/// 해당 tx의 평탄화된 `trace_log` 콜트리(1:N)를 함께 담는다.
+/// 해당 tx의 평탄화된 `trace_log` 콜트리(1:N), 그리고 `root_cause`(첫 error
+/// frame)를 함께 담는다.
 #[derive(Debug, Clone, Serialize)]
 pub struct FailedTxDetail {
     /// 실패 트랜잭션 메타 + 분류 결과
@@ -430,6 +431,10 @@ pub struct FailedTxDetail {
     pub call_tree: Vec<TraceLog>,
     /// `call_tree`가 상한에서 잘렸으면 `true` (부분 응답 신호)
     pub call_tree_truncated: bool,
+    /// 실제 revert가 발생한 trace frame — `trace_log`에서 `error IS NOT NULL`인
+    /// 가장 빠른(`trace_id ASC`) 1행 (= pre-order DFS 첫 error). 매칭 frame이
+    /// 없으면 `null` (S10 / M004; silent default 금지 — 명시 `null` 노출).
+    pub root_cause: Option<TraceLog>,
 }
 
 /// 실패 추이 시계열의 한 점 (failed_tx_timeseries).
