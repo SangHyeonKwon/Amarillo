@@ -6,6 +6,7 @@ import type {
   DailySwapVolume,
   Decimal,
   DecodedFunction,
+  Diagnosis,
   ErrorCategory,
   FailedTransaction,
   FailedTxAnalysis,
@@ -387,6 +388,18 @@ function parseDecodedFunction(value: unknown, path: string): DecodedFunction {
   };
 }
 
+function parseDiagnosis(value: unknown, path: string): Diagnosis {
+  const obj = readRecord(value, path);
+  return {
+    message: readString(obj.message, `${path}.message`),
+    recommended_action: readOptionalString(
+      obj.recommended_action,
+      `${path}.recommended_action`,
+    ),
+    source: readOptionalString(obj.source, `${path}.source`),
+  };
+}
+
 function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
   const obj = readRecord(value, path);
   if (!Array.isArray(obj.call_tree)) {
@@ -423,6 +436,16 @@ function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
           obj.failing_function_decoded,
           `${path}.failing_function_decoded`,
         );
+  // S12 / M004 — same explicit-null contract for diagnosis.
+  if (!("diagnosis" in obj)) {
+    throw new Error(
+      `Invalid contract at ${path}.diagnosis: missing (expected null or object).`,
+    );
+  }
+  const diagnosis =
+    obj.diagnosis === null
+      ? null
+      : parseDiagnosis(obj.diagnosis, `${path}.diagnosis`);
   return {
     failed: parseFailedTransaction(obj.failed, `${path}.failed`),
     call_tree: obj.call_tree.map((item, idx) =>
@@ -431,6 +454,7 @@ function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
     call_tree_truncated: obj.call_tree_truncated,
     root_cause,
     failing_function_decoded,
+    diagnosis,
   };
 }
 

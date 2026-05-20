@@ -845,6 +845,56 @@ export function FailedTx() {
                       (silent default is intentionally not allowed; see docs).
                     </div>
                   )}
+                  {detail.diagnosis ? (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 10,
+                        borderLeft: "3px solid #3ecf8e",
+                        background: "rgba(62,207,142,0.07)",
+                        fontSize: 13,
+                      }}
+                    >
+                      <div className="card-sub" style={{ marginBottom: 6 }}>
+                        Diagnosis — why it failed + what to try next
+                      </div>
+                      <div
+                        style={{
+                          marginBottom: detail.diagnosis.recommended_action
+                            ? 6
+                            : 0,
+                        }}
+                      >
+                        {detail.diagnosis.message}
+                      </div>
+                      {detail.diagnosis.recommended_action && (
+                        <div style={{ fontWeight: 600 }}>
+                          ▶ {detail.diagnosis.recommended_action}
+                        </div>
+                      )}
+                      {detail.diagnosis.source && (
+                        <span
+                          className="badge"
+                          style={{
+                            fontSize: 10,
+                            marginTop: 6,
+                            display: "inline-block",
+                          }}
+                        >
+                          {detail.diagnosis.source}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <div
+                      className="muted"
+                      style={{ marginTop: 12, fontSize: 13 }}
+                    >
+                      Diagnosis: <span className="mono">null</span> — this
+                      error_category isn't seeded yet (operators can extend
+                      via `category_diagnosis`).
+                    </div>
+                  )}
                   <div
                     style={{
                       marginTop: 12,
