@@ -1,4 +1,6 @@
 import type {
+  AlertSubscription,
+  AlertSubscriptionCreated,
   ApiResponse,
   Block,
   DailySwapVolume,
@@ -42,6 +44,13 @@ function readString(value: unknown, path: string): string {
 function readOptionalString(value: unknown, path: string): string | null {
   if (value === null) return null;
   return readString(value, path);
+}
+
+function readBoolean(value: unknown, path: string): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error(`Invalid contract at ${path}: expected boolean.`);
+  }
+  return value;
 }
 
 function readNumber(value: unknown, path: string): number {
@@ -420,4 +429,61 @@ export function parseFailedTxTimeseriesEnvelope(
       parseFailedTxTrendPoint(item, `${path}[${idx}]`),
     );
   });
+}
+
+// ── Alert subscriptions (S08 + HARDEN2) ─────────────────────────────
+
+function parseAlertSubscription(value: unknown, path: string): AlertSubscription {
+  const obj = readRecord(value, path);
+  const cat = obj.error_category;
+  return {
+    subscription_id: readInteger(obj.subscription_id, `${path}.subscription_id`),
+    error_category:
+      cat == null
+        ? null
+        : normalizeErrorCategory(cat, `${path}.error_category`),
+    to_addr: readOptionalString(obj.to_addr, `${path}.to_addr`),
+    webhook_url: readString(obj.webhook_url, `${path}.webhook_url`),
+    active: readBoolean(obj.active, `${path}.active`),
+    created_at: readIsoDateTime(obj.created_at, `${path}.created_at`),
+  };
+}
+
+function parseAlertSubscriptionCreated(
+  value: unknown,
+  path: string,
+): AlertSubscriptionCreated {
+  const obj = readRecord(value, path);
+  const cat = obj.error_category;
+  return {
+    subscription_id: readInteger(obj.subscription_id, `${path}.subscription_id`),
+    error_category:
+      cat == null
+        ? null
+        : normalizeErrorCategory(cat, `${path}.error_category`),
+    to_addr: readOptionalString(obj.to_addr, `${path}.to_addr`),
+    webhook_url: readString(obj.webhook_url, `${path}.webhook_url`),
+    signing_secret: readString(obj.signing_secret, `${path}.signing_secret`),
+    active: readBoolean(obj.active, `${path}.active`),
+    created_at: readIsoDateTime(obj.created_at, `${path}.created_at`),
+  };
+}
+
+export function parseAlertSubscriptionListEnvelope(
+  value: unknown,
+): ApiResponse<AlertSubscription[]> {
+  return parseApiResponse(value, (data, path) => {
+    if (!Array.isArray(data)) {
+      throw new Error(`Invalid contract at ${path}: expected array.`);
+    }
+    return data.map((item, idx) =>
+      parseAlertSubscription(item, `${path}[${idx}]`),
+    );
+  });
+}
+
+export function parseAlertSubscriptionCreatedEnvelope(
+  value: unknown,
+): ApiResponse<AlertSubscriptionCreated> {
+  return parseApiResponse(value, parseAlertSubscriptionCreated);
 }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   normalizeAddressParam,
+  parseAlertSubscriptionCreatedEnvelope,
+  parseAlertSubscriptionListEnvelope,
   parseFailedTxDetailEnvelope,
   parseFailedTxEnvelope,
   parseFailedTxListEnvelope,
@@ -176,6 +178,95 @@ describe("api/contract", () => {
     expect(parsed.data[0].error_category).toBe("UNKNOWN");
     expect(parsed.data[1].error_category).toBe("INSUFFICIENT_BALANCE");
     expect(parsed.data[1].failure_count).toBe(3);
+  });
+
+  // ── FE-WIRE2-T01: alert-subscription parsers ─────────────────
+
+  it("parses alert subscription list with nullable filters; never carries secret", () => {
+    const parsed = parseAlertSubscriptionListEnvelope({
+      data: [
+        {
+          subscription_id: 1,
+          // SCREAMING_SNAKE wire form
+          error_category: "SLIPPAGE_EXCEEDED",
+          to_addr: "0x00000000000000000000000000000000000000aa",
+          webhook_url: "https://example.com/hook",
+          active: true,
+          created_at: "2025-01-01T00:00:00Z",
+        },
+        {
+          subscription_id: 2,
+          // both filters absent (NULL = "match anything")
+          error_category: null,
+          to_addr: null,
+          webhook_url: "https://example.com/hook2",
+          active: false,
+          created_at: "2025-01-02T00:00:00Z",
+        },
+      ],
+    });
+
+    expect(parsed.data).toHaveLength(2);
+    expect(parsed.data[0].error_category).toBe("SLIPPAGE_EXCEEDED");
+    expect(parsed.data[0].active).toBe(true);
+    expect(parsed.data[1].error_category).toBeNull();
+    expect(parsed.data[1].to_addr).toBeNull();
+    expect(parsed.data[1].active).toBe(false);
+    // List rows are *not* the created shape — secret has no place here.
+    expect("signing_secret" in parsed.data[0]).toBe(false);
+    expect("signing_secret" in parsed.data[1]).toBe(false);
+  });
+
+  it("parses alert subscription created (one-time signing_secret revealed)", () => {
+    const parsed = parseAlertSubscriptionCreatedEnvelope({
+      data: {
+        subscription_id: 42,
+        error_category: { Unknown: null }, // serde-tagged enum object form
+        to_addr: null,
+        webhook_url: "https://example.com/hook",
+        signing_secret:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        active: true,
+        created_at: "2025-01-01T00:00:00Z",
+      },
+    });
+    expect(parsed.data.signing_secret).toHaveLength(64);
+    expect(parsed.data.error_category).toBe("UNKNOWN");
+    expect(parsed.data.subscription_id).toBe(42);
+  });
+
+  it("alert subscription created throws when signing_secret missing", () => {
+    expect(() =>
+      parseAlertSubscriptionCreatedEnvelope({
+        data: {
+          subscription_id: 42,
+          error_category: null,
+          to_addr: null,
+          webhook_url: "https://example.com/hook",
+          // signing_secret intentionally omitted — the parser must refuse
+          // to silently produce an `undefined` secret.
+          active: true,
+          created_at: "2025-01-01T00:00:00Z",
+        },
+      }),
+    ).toThrow(/signing_secret/);
+  });
+
+  it("alert subscription throws when `active` isn't boolean", () => {
+    expect(() =>
+      parseAlertSubscriptionListEnvelope({
+        data: [
+          {
+            subscription_id: 1,
+            error_category: null,
+            to_addr: null,
+            webhook_url: "https://example.com",
+            active: "yes", // not boolean
+            created_at: "2025-01-01T00:00:00Z",
+          },
+        ],
+      }),
+    ).toThrow(/active/);
   });
 
   it("failed-tx detail throws on malformed shape", () => {

@@ -73,4 +73,70 @@ export async function apiGet<T>(
   return parser ? parser(body) : (body as T);
 }
 
+/**
+ * Performs a POST request with an optional JSON body and parses the JSON
+ * response. Pass `body = undefined` for endpoints that take no body
+ * (e.g. `/rotate-secret`). `Content-Type: application/json` is only attached
+ * when a body is sent.
+ *
+ * @throws {ApiError} on any non-2xx response.
+ */
+export async function apiPost<T>(
+  path: string,
+  body: unknown,
+  signal?: AbortSignal,
+  parser?: ResponseParser<T>,
+): Promise<T> {
+  const init: RequestInit = {
+    method: "POST",
+    headers:
+      body === undefined
+        ? { Accept: "application/json" }
+        : { Accept: "application/json", "Content-Type": "application/json" },
+    signal,
+  };
+  if (body !== undefined) {
+    init.body = JSON.stringify(body);
+  }
+  const res = await fetch(`${BASE_URL}${path}`, init);
+
+  if (!res.ok) {
+    let message = res.statusText || `HTTP ${res.status}`;
+    try {
+      const errBody = (await res.json()) as ApiErrorBody;
+      if (errBody?.error) message = errBody.error;
+    } catch {
+      // Non-JSON error body — fall back to status text.
+    }
+    throw new ApiError(res.status, message);
+  }
+
+  const respBody = (await res.json()) as unknown;
+  return parser ? parser(respBody) : (respBody as T);
+}
+
+/**
+ * Performs a DELETE request. The backend uses 204 No Content for successful
+ * soft-deactivation; this helper expects no body and returns `void`.
+ *
+ * @throws {ApiError} on any non-2xx response.
+ */
+export async function apiDelete(path: string, signal?: AbortSignal): Promise<void> {
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: "DELETE",
+    headers: { Accept: "application/json" },
+    signal,
+  });
+  if (!res.ok) {
+    let message = res.statusText || `HTTP ${res.status}`;
+    try {
+      const errBody = (await res.json()) as ApiErrorBody;
+      if (errBody?.error) message = errBody.error;
+    } catch {
+      // Non-JSON error body.
+    }
+    throw new ApiError(res.status, message);
+  }
+}
+
 export { BASE_URL as API_BASE_URL };

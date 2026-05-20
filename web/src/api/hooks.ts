@@ -6,10 +6,12 @@
  * `pagination`. Query keys mirror the URL + params for predictable caching.
  */
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
   normalizeAddressParam,
+  parseAlertSubscriptionCreatedEnvelope,
+  parseAlertSubscriptionListEnvelope,
   parseBlockEnvelope,
   parseDailyVolumeEnvelope,
   parseFailedTxDetailEnvelope,
@@ -24,8 +26,13 @@ import {
   parseTokensEnvelope,
   parseTradersEnvelope,
 } from "./contract";
-import { apiGet } from "./client";
-import type { ErrorCategory, IsoDateTime, TimeBucket } from "./types";
+import { apiDelete, apiGet, apiPost } from "./client";
+import type {
+  CreateAlertSubscriptionBody,
+  ErrorCategory,
+  IsoDateTime,
+  TimeBucket,
+} from "./types";
 
 const STALE_TIME = 30_000;
 
@@ -282,5 +289,88 @@ export function useFailedTxTimeseries({
       ),
     select: (r) => r.data,
     staleTime: STALE_TIME,
+  });
+}
+
+// ── Alert subscriptions (S08 + HARDEN2) ─────────────────────────────
+
+export interface AlertSubscriptionsListArgs {
+  limit?: number;
+}
+
+/**
+ * Active *and* inactive alert subscriptions, newest first. The list never
+ * contains `signing_secret` — the backend serde-skips it and the parser does
+ * not look it up. The secret is only available on the create/rotate mutation
+ * response, **once**.
+ */
+export function useAlertSubscriptions({
+  limit = 100,
+}: AlertSubscriptionsListArgs = {}) {
+  return useQuery({
+    queryKey: ["alert-subscriptions", { limit }],
+    queryFn: ({ signal }) =>
+      apiGet(
+        "/v1/alert-subscriptions",
+        { limit },
+        signal,
+        parseAlertSubscriptionListEnvelope,
+      ),
+    select: (r) => r.data,
+    staleTime: STALE_TIME,
+  });
+}
+
+/**
+ * Create a new subscription. The mutation response contains the **one-time
+ * signing_secret**; the UI must surface it in a reveal modal and then call
+ * `mutation.reset()` so the value isn't retained in any cache after the
+ * modal closes.
+ */
+export function useCreateAlertSubscription() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateAlertSubscriptionBody) =>
+      apiPost(
+        "/v1/alert-subscriptions",
+        body,
+        undefined,
+        parseAlertSubscriptionCreatedEnvelope,
+      ),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["alert-subscriptions"] });
+    },
+  });
+}
+
+/**
+ * Rotate an existing subscription's signing secret. Same one-time-reveal
+ * contract as creation — surface in a modal, then reset.
+ */
+export function useRotateAlertSubscription() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (subscriptionId: number) =>
+      apiPost(
+        `/v1/alert-subscriptions/${subscriptionId}/rotate-secret`,
+        undefined,
+        undefined,
+        parseAlertSubscriptionCreatedEnvelope,
+      ),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["alert-subscriptions"] });
+    },
+  });
+}
+
+/** Soft-deactivate a subscription. Backend returns 204; we map to `void`. */
+export function useDeactivateAlertSubscription() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (subscriptionId: number) =>
+      apiDelete(`/v1/alert-subscriptions/${subscriptionId}`),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["alert-subscriptions"] });
+    },
   });
 }

@@ -154,6 +154,53 @@ export type TimeBucket = "hour" | "day" | "week";
 
 export const TIME_BUCKETS: TimeBucket[] = ["hour", "day", "week"];
 
+// ── Alert subscriptions (S08 + HARDEN2) ─────────────────────────────
+
+/**
+ * `/v1/alert-subscriptions` list/get row. The backend serde-skips
+ * `signing_secret` here (`#[serde(skip_serializing)]` on the model), so this
+ * type **intentionally omits it** — the secret is only present on
+ * `AlertSubscriptionCreated` (one-time reveal on POST and rotate).
+ */
+export interface AlertSubscription {
+  subscription_id: number;
+  /** Match category; `null` = all categories. */
+  error_category: ErrorCategory | null;
+  /** Match contract address (lowercased); `null` = all addresses. */
+  to_addr: string | null;
+  webhook_url: string;
+  active: boolean;
+  created_at: IsoDateTime;
+}
+
+/**
+ * `POST /v1/alert-subscriptions` and `POST .../rotate-secret` response. Adds
+ * `signing_secret` to the regular subscription shape — **revealed exactly
+ * once**, never returned afterwards. The UI must surface it in a copy modal
+ * and then drop the value from memory; do **not** persist it in any cache.
+ */
+export interface AlertSubscriptionCreated {
+  subscription_id: number;
+  error_category: ErrorCategory | null;
+  to_addr: string | null;
+  webhook_url: string;
+  /**
+   * 64-character hex. The dispatcher hex-decodes it to 32 bytes and uses
+   * those as the HMAC-SHA256 key (HARDEN2-T02). Receivers must do the same
+   * — see `docs/api-alerts.md`.
+   */
+  signing_secret: string;
+  active: boolean;
+  created_at: IsoDateTime;
+}
+
+/** `POST /v1/alert-subscriptions` request body. */
+export interface CreateAlertSubscriptionBody {
+  webhook_url: string;
+  error_category?: ErrorCategory;
+  to_addr?: string;
+}
+
 export interface PoolStats {
   pair_name: string;
   swap_count: number;
