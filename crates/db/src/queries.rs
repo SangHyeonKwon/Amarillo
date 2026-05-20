@@ -4,9 +4,10 @@ use sqlx::PgPool;
 use crate::error::DbError;
 use crate::models::{
     AlertMatch, AlertSubscription, Block, ContractLabel, DailySwapVolume, ErrorCategory,
-    FailedTransaction, FailedTxAnalysis, FailedTxByLabelPoint, FailedTxTrendPoint, LiquidityEvent,
-    LiquidityEventType, Pool, PoolStats, PriceSnapshot, SnapshotInterval, SwapEvent, TimeBucket,
-    Token, TokenTransfer, TopTrader, TraceLog, Transaction, UserProfile,
+    FailedTransaction, FailedTxAnalysis, FailedTxByLabelPoint, FailedTxTrendPoint,
+    FunctionSignature, LiquidityEvent, LiquidityEventType, Pool, PoolStats, PriceSnapshot,
+    SnapshotInterval, SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader, TraceLog,
+    Transaction, UserProfile,
 };
 
 /// PostgreSQL enum 값으로 변환하는 헬퍼.
@@ -1217,6 +1218,31 @@ pub async fn failed_tx_by_label_aggregate(
         out.truncate(limit as usize);
     }
     Ok(out)
+}
+
+// ============================================
+// Function signature decoding (S11 / M004) — selector → name/signature
+// ============================================
+
+/// 4-byte function selector로 자기소유 ABI 시드를 lookup한다 (S11 / M004).
+///
+/// `selector`는 `0x` + 8 hex (예: `0xa9059cbb`). 대소문자 무관(`LOWER($1)` lookup).
+/// 매칭 없으면 `None` — silent default 금지(호출자가 명시 `null`로 직렬화, D014).
+#[tracing::instrument(skip(pool))]
+pub async fn get_function_signature(
+    pool: &PgPool,
+    selector: &str,
+) -> Result<Option<FunctionSignature>, DbError> {
+    let row = sqlx::query_as::<_, FunctionSignature>(
+        "SELECT selector, name, signature, source, created_at
+         FROM function_signature
+         WHERE selector = LOWER($1)
+         LIMIT 1",
+    )
+    .bind(selector)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 /// 한 (구독 × tx) 쌍에 대한 전송 권리를 **원자적으로 claim** 한다 (HARDEN-T02).
