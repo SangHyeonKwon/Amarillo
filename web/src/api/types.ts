@@ -104,6 +104,56 @@ export interface FailedTxAnalysis {
   most_recent_failure: IsoDateTime;
 }
 
+// ── Failure-intelligence: per-tx detail / filtered list / timeseries (M001) ─
+
+/** Single `failed_transaction` row — `crates/db/src/models.rs`. */
+export interface FailedTransaction {
+  tx_hash: string;
+  error_category: ErrorCategory;
+  revert_reason: string | null;
+  failing_function: string | null;
+  gas_used: number;
+  timestamp: IsoDateTime;
+}
+
+/**
+ * One flattened call-tree frame (`trace_log` row). The frames are returned in
+ * pre-order DFS = strictly ascending `trace_id` (the order they were inserted).
+ */
+export interface TraceLog {
+  tx_hash: string;
+  call_depth: number;
+  call_type: string;
+  from_addr: string;
+  to_addr: string | null;
+  value: Decimal;
+  gas_used: number;
+  input: string | null;
+  output: string | null;
+  error: string | null;
+  trace_id: number;
+}
+
+/** `GET /v1/failed-tx/{tx_hash}` payload (S01 + S04 N+1 truncation). */
+export interface FailedTxDetail {
+  failed: FailedTransaction;
+  call_tree: TraceLog[];
+  /** True when `call_tree` hit the response cap; the tail was dropped. */
+  call_tree_truncated: boolean;
+}
+
+/** One bucket of the failure timeseries (`failed_tx_timeseries`, S03). */
+export interface FailedTxTrendPoint {
+  bucket: IsoDateTime;
+  error_category: ErrorCategory;
+  failure_count: number;
+}
+
+/** Allowed bucket sizes for the failure timeseries (`date_trunc` whitelist). */
+export type TimeBucket = "hour" | "day" | "week";
+
+export const TIME_BUCKETS: TimeBucket[] = ["hour", "day", "week"];
+
 export interface PoolStats {
   pair_name: string;
   swap_count: number;
@@ -132,6 +182,25 @@ export interface PaginationInfo {
 export interface PaginatedResponse<T> {
   data: T[];
   pagination: PaginationInfo;
+}
+
+/**
+ * Pagination meta WITH a filter-adjusted total (D005). New endpoints
+ * (`GET /v1/failed-tx`) use this so embed consumers can show "N of TOTAL".
+ */
+export interface PaginationMeta {
+  limit: number;
+  offset: number;
+  /** Count of rows in this page (may be < `limit` on the last page). */
+  count: number;
+  /** Total rows across all pages, after filters. */
+  total: number;
+}
+
+/** `crates/api/src/response.rs` — paginated list wrapper WITH total (D005). */
+export interface TotalPaginatedResponse<T> {
+  data: T[];
+  pagination: PaginationMeta;
 }
 
 /** `crates/api/src/error.rs` — error body is `{ "error": string }`. */

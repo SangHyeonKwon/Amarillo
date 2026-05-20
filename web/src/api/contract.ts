@@ -4,14 +4,20 @@ import type {
   DailySwapVolume,
   Decimal,
   ErrorCategory,
+  FailedTransaction,
   FailedTxAnalysis,
+  FailedTxDetail,
+  FailedTxTrendPoint,
   PaginatedResponse,
   PaginationInfo,
+  PaginationMeta,
   Pool,
   PoolStats,
   SwapEvent,
   Token,
   TopTrader,
+  TotalPaginatedResponse,
+  TraceLog,
 } from "./types";
 import { ERROR_CATEGORIES } from "./types";
 
@@ -142,6 +148,31 @@ export function parsePaginatedResponse<T>(
   return {
     data: rawData.map((item, idx) => parseItem(item, `response.data[${idx}]`)),
     pagination: parsePaginationInfo(obj.pagination, "response.pagination"),
+  };
+}
+
+function parsePaginationMeta(value: unknown, path: string): PaginationMeta {
+  const obj = readRecord(value, path);
+  return {
+    limit: readInteger(obj.limit, `${path}.limit`),
+    offset: readInteger(obj.offset, `${path}.offset`),
+    count: readInteger(obj.count, `${path}.count`),
+    total: readInteger(obj.total, `${path}.total`),
+  };
+}
+
+export function parseTotalPaginatedResponse<T>(
+  value: unknown,
+  parseItem: (item: unknown, path: string) => T,
+): TotalPaginatedResponse<T> {
+  const obj = readRecord(value, "response");
+  const rawData = obj.data;
+  if (!Array.isArray(rawData)) {
+    throw new Error("Invalid contract at response.data: expected array.");
+  }
+  return {
+    data: rawData.map((item, idx) => parseItem(item, `response.data[${idx}]`)),
+    pagination: parsePaginationMeta(obj.pagination, "response.pagination"),
   };
 }
 
@@ -295,5 +326,98 @@ export function parseFailedTxEnvelope(value: unknown): ApiResponse<FailedTxAnaly
       throw new Error(`Invalid contract at ${path}: expected array.`);
     }
     return data.map((item, idx) => parseFailedTxAnalysis(item, `${path}[${idx}]`));
+  });
+}
+
+// ── Failure-intelligence (detail / filtered list / timeseries, M001) ────────
+
+function parseFailedTransaction(value: unknown, path: string): FailedTransaction {
+  const obj = readRecord(value, path);
+  return {
+    tx_hash: readString(obj.tx_hash, `${path}.tx_hash`),
+    error_category: normalizeErrorCategory(
+      obj.error_category,
+      `${path}.error_category`,
+    ),
+    revert_reason: readOptionalString(obj.revert_reason, `${path}.revert_reason`),
+    failing_function: readOptionalString(
+      obj.failing_function,
+      `${path}.failing_function`,
+    ),
+    gas_used: readInteger(obj.gas_used, `${path}.gas_used`),
+    timestamp: readIsoDateTime(obj.timestamp, `${path}.timestamp`),
+  };
+}
+
+function parseTraceLog(value: unknown, path: string): TraceLog {
+  const obj = readRecord(value, path);
+  return {
+    tx_hash: readString(obj.tx_hash, `${path}.tx_hash`),
+    call_depth: readInteger(obj.call_depth, `${path}.call_depth`),
+    call_type: readString(obj.call_type, `${path}.call_type`),
+    from_addr: readString(obj.from_addr, `${path}.from_addr`),
+    to_addr: readOptionalString(obj.to_addr, `${path}.to_addr`),
+    value: readDecimal(obj.value, `${path}.value`),
+    gas_used: readInteger(obj.gas_used, `${path}.gas_used`),
+    input: readOptionalString(obj.input, `${path}.input`),
+    output: readOptionalString(obj.output, `${path}.output`),
+    error: readOptionalString(obj.error, `${path}.error`),
+    trace_id: readInteger(obj.trace_id, `${path}.trace_id`),
+  };
+}
+
+function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
+  const obj = readRecord(value, path);
+  if (!Array.isArray(obj.call_tree)) {
+    throw new Error(`Invalid contract at ${path}.call_tree: expected array.`);
+  }
+  if (typeof obj.call_tree_truncated !== "boolean") {
+    throw new Error(
+      `Invalid contract at ${path}.call_tree_truncated: expected boolean.`,
+    );
+  }
+  return {
+    failed: parseFailedTransaction(obj.failed, `${path}.failed`),
+    call_tree: obj.call_tree.map((item, idx) =>
+      parseTraceLog(item, `${path}.call_tree[${idx}]`),
+    ),
+    call_tree_truncated: obj.call_tree_truncated,
+  };
+}
+
+function parseFailedTxTrendPoint(value: unknown, path: string): FailedTxTrendPoint {
+  const obj = readRecord(value, path);
+  return {
+    bucket: readIsoDateTime(obj.bucket, `${path}.bucket`),
+    error_category: normalizeErrorCategory(
+      obj.error_category,
+      `${path}.error_category`,
+    ),
+    failure_count: readInteger(obj.failure_count, `${path}.failure_count`),
+  };
+}
+
+export function parseFailedTxDetailEnvelope(
+  value: unknown,
+): ApiResponse<FailedTxDetail> {
+  return parseApiResponse(value, parseFailedTxDetail);
+}
+
+export function parseFailedTxListEnvelope(
+  value: unknown,
+): TotalPaginatedResponse<FailedTransaction> {
+  return parseTotalPaginatedResponse(value, parseFailedTransaction);
+}
+
+export function parseFailedTxTimeseriesEnvelope(
+  value: unknown,
+): ApiResponse<FailedTxTrendPoint[]> {
+  return parseApiResponse(value, (data, path) => {
+    if (!Array.isArray(data)) {
+      throw new Error(`Invalid contract at ${path}: expected array.`);
+    }
+    return data.map((item, idx) =>
+      parseFailedTxTrendPoint(item, `${path}[${idx}]`),
+    );
   });
 }
