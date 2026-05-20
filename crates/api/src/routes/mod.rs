@@ -53,7 +53,7 @@ fn v1_router() -> Router<PgPool> {
         // failed-tx
         .route("/failed-tx", get(failed_tx::list_failed_tx))
         .route("/failed-tx/{tx_hash}", get(failed_tx::get_failed_tx))
-        // alert subscriptions (S08)
+        // alert subscriptions (S08, HARDEN2)
         .route(
             "/alert-subscriptions",
             post(alerts::create_alert_subscription).get(alerts::list_alert_subscriptions),
@@ -61,5 +61,9 @@ fn v1_router() -> Router<PgPool> {
         .route(
             "/alert-subscriptions/{id}",
             delete(alerts::deactivate_alert_subscription),
+        )
+        .route(
+            "/alert-subscriptions/{id}/rotate-secret",
+            post(alerts::rotate_alert_subscription_secret),
         )
 }
