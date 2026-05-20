@@ -3,10 +3,10 @@ use sqlx::PgPool;
 
 use crate::error::DbError;
 use crate::models::{
-    AlertMatch, AlertSubscription, Block, DailySwapVolume, ErrorCategory, FailedTransaction,
-    FailedTxAnalysis, FailedTxTrendPoint, LiquidityEvent, LiquidityEventType, Pool, PoolStats,
-    PriceSnapshot, SnapshotInterval, SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader,
-    TraceLog, Transaction, UserProfile,
+    AlertMatch, AlertSubscription, Block, ContractLabel, DailySwapVolume, ErrorCategory,
+    FailedTransaction, FailedTxAnalysis, FailedTxByLabelPoint, FailedTxTrendPoint, LiquidityEvent,
+    LiquidityEventType, Pool, PoolStats, PriceSnapshot, SnapshotInterval, SwapEvent, TimeBucket,
+    Token, TokenTransfer, TopTrader, TraceLog, Transaction, UserProfile,
 };
 
 /// PostgreSQL enum 값으로 변환하는 헬퍼.
@@ -1068,6 +1068,130 @@ pub async fn rotate_alert_subscription_secret(
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+// ============================================
+// Contract labels (S09 / M003) — 온체인 × 비공개 라벨 조인
+// ============================================
+
+/// 컨트랙트 라벨을 등록한다(멱등 — 이미 있으면 no-op). `address`는 lowercased.
+#[tracing::instrument(skip(pool))]
+pub async fn insert_contract_label(
+    pool: &PgPool,
+    address: &str,
+    label: &str,
+    owner_id: Option<&str>,
+) -> Result<(), DbError> {
+    sqlx::query(
+        "INSERT INTO contract_label (address, label, owner_id)
+         VALUES (LOWER($1), $2, $3)
+         ON CONFLICT (address) DO NOTHING",
+    )
+    .bind(address)
+    .bind(label)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// 컨트랙트 라벨을 영구 삭제한다(admin/test 용도). 영향 행 수를 반환한다.
+#[tracing::instrument(skip(pool))]
+pub async fn delete_contract_label(pool: &PgPool, address: &str) -> Result<u64, DbError> {
+    let res = sqlx::query("DELETE FROM contract_label WHERE address = LOWER($1)")
+        .bind(address)
+        .execute(pool)
+        .await?;
+    Ok(res.rows_affected())
+}
+
+/// 등록된 라벨 목록(최신순) — admin/디버그용. `owner_id`로 필터.
+#[tracing::instrument(skip(pool))]
+pub async fn list_contract_labels(
+    pool: &PgPool,
+    owner_id: Option<&str>,
+    limit: i64,
+) -> Result<Vec<ContractLabel>, DbError> {
+    let rows = sqlx::query_as::<_, ContractLabel>(
+        "SELECT address, label, owner_id, created_at
+         FROM contract_label
+         WHERE ($1::TEXT IS NULL OR owner_id = $1)
+         ORDER BY created_at DESC
+         LIMIT $2",
+    )
+    .bind(owner_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// 라벨된 컨트랙트별 실패 분포(S09 / M003).
+///
+/// `failed_transaction × transaction × contract_label` 조인 후 (라벨, 주소,
+/// 카테고리) 그룹 카운트를 받아 Rust에서 (라벨, 주소)별로 카테고리 맵으로
+/// **피벗**한다(sqlx `json` 피처 무도입을 위해). owner_id 필터로 공개(NULL)/
+/// 테넌트 분리 가능. 시간 필터·limit 적용. 결과는 `total_failures` 내림차순.
+#[tracing::instrument(skip(pool))]
+pub async fn failed_tx_by_label_aggregate(
+    pool: &PgPool,
+    owner_id: Option<&str>,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    limit: i64,
+) -> Result<Vec<FailedTxByLabelPoint>, DbError> {
+    use std::collections::HashMap;
+
+    #[derive(sqlx::FromRow)]
+    struct RawRow {
+        label: String,
+        address: String,
+        error_category: String,
+        cnt: i64,
+    }
+
+    let raw = sqlx::query_as::<_, RawRow>(
+        "SELECT cl.label,
+                cl.address,
+                f.error_category::TEXT AS error_category,
+                COUNT(*)::BIGINT AS cnt
+         FROM contract_label cl
+         JOIN transaction t ON t.to_addr = cl.address
+         JOIN failed_transaction f ON f.tx_hash = t.tx_hash
+         WHERE ($1::TEXT IS NULL OR cl.owner_id = $1)
+           AND ($2::TIMESTAMPTZ IS NULL OR f.timestamp >= $2)
+           AND ($3::TIMESTAMPTZ IS NULL OR f.timestamp <= $3)
+         GROUP BY cl.label, cl.address, f.error_category",
+    )
+    .bind(owner_id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(pool)
+    .await?;
+
+    let mut groups: HashMap<(String, String), (i64, HashMap<String, i64>)> = HashMap::new();
+    for r in raw {
+        let key = (r.label, r.address);
+        let entry = groups.entry(key).or_insert_with(|| (0i64, HashMap::new()));
+        entry.0 += r.cnt;
+        entry.1.insert(r.error_category, r.cnt);
+    }
+
+    let mut out: Vec<FailedTxByLabelPoint> = groups
+        .into_iter()
+        .map(|((label, address), (total, by_cat))| FailedTxByLabelPoint {
+            label,
+            address,
+            total_failures: total,
+            by_category: by_cat,
+        })
+        .collect();
+
+    out.sort_by(|a, b| b.total_failures.cmp(&a.total_failures));
+    if limit > 0 {
+        out.truncate(limit as usize);
+    }
+    Ok(out)
 }
 
 /// 한 (구독 × tx) 쌍에 대한 전송 권리를 **원자적으로 claim** 한다 (HARDEN-T02).
