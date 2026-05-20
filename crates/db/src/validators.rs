@@ -60,6 +60,35 @@ pub fn webhook_url_is_safe(input: &str) -> Result<(), UnsafeUrlReason> {
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host_raw);
     if let Ok(ip) = IpAddr::from_str(host) {
+        // IPv6 분기에서 IPv4-mapped(`::ffff:a.b.c.d`)를 먼저 펴낸 뒤 IPv4 규칙
+        // 적용 — `IpAddr::is_loopback`/`Ipv6Addr` 마스크는 mapped 형태를 못 잡아
+        // `https://[::ffff:127.0.0.1]/x` 같은 우회가 생긴다(리뷰 H1).
+        let v4_to_check: Option<std::net::Ipv4Addr> = match ip {
+            IpAddr::V4(v4) => Some(v4),
+            IpAddr::V6(v6) => v6.to_ipv4_mapped(),
+        };
+        if let Some(v4) = v4_to_check {
+            if v4.is_loopback() {
+                return Err(LoopbackHost);
+            }
+            if v4.is_unspecified() {
+                return Err(UnspecifiedIp);
+            }
+            if v4.is_multicast() {
+                return Err(MulticastIp);
+            }
+            if v4.is_private() {
+                return Err(PrivateIp);
+            }
+            if v4.is_link_local() {
+                return Err(LinkLocalIp);
+            }
+            if v4.is_broadcast() {
+                return Err(BroadcastIp);
+            }
+            return Ok(());
+        }
+        // 순수 IPv6 (mapped 아닌)
         if ip.is_loopback() {
             return Err(LoopbackHost);
         }
@@ -69,26 +98,13 @@ pub fn webhook_url_is_safe(input: &str) -> Result<(), UnsafeUrlReason> {
         if ip.is_multicast() {
             return Err(MulticastIp);
         }
-        match ip {
-            IpAddr::V4(v4) => {
-                if v4.is_private() {
-                    return Err(PrivateIp);
-                }
-                if v4.is_link_local() {
-                    return Err(LinkLocalIp);
-                }
-                if v4.is_broadcast() {
-                    return Err(BroadcastIp);
-                }
+        if let IpAddr::V6(v6) = ip {
+            let seg0 = v6.segments()[0];
+            if (seg0 & 0xfe00) == 0xfc00 {
+                return Err(UniqueLocalIp);
             }
-            IpAddr::V6(v6) => {
-                let seg0 = v6.segments()[0];
-                if (seg0 & 0xfe00) == 0xfc00 {
-                    return Err(UniqueLocalIp);
-                }
-                if (seg0 & 0xffc0) == 0xfe80 {
-                    return Err(LinkLocalIp);
-                }
+            if (seg0 & 0xffc0) == 0xfe80 {
+                return Err(LinkLocalIp);
             }
         }
         return Ok(());
@@ -203,6 +219,52 @@ mod tests {
             webhook_url_is_safe("https://[fe80::1]/x"),
             Err(UnsafeUrlReason::LinkLocalIp)
         );
+    }
+
+    // 리뷰 H1 회귀: IPv4-mapped IPv6 (`::ffff:a.b.c.d`) 우회 차단 — 매핑된
+    // IPv4를 펴낸 뒤 IPv4 규칙을 적용해 loopback/private/link-local·메타데이터
+    // 모두 잡는다.
+
+    #[test]
+    fn rejects_ipv4_mapped_loopback() {
+        assert_eq!(
+            webhook_url_is_safe("https://[::ffff:127.0.0.1]/x"),
+            Err(UnsafeUrlReason::LoopbackHost)
+        );
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_private() {
+        assert_eq!(
+            webhook_url_is_safe("https://[::ffff:10.0.0.1]/x"),
+            Err(UnsafeUrlReason::PrivateIp)
+        );
+        assert_eq!(
+            webhook_url_is_safe("https://[::ffff:192.168.1.1]/x"),
+            Err(UnsafeUrlReason::PrivateIp)
+        );
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_link_local_and_metadata() {
+        assert_eq!(
+            webhook_url_is_safe("https://[::ffff:169.254.169.254]/x"),
+            Err(UnsafeUrlReason::LinkLocalIp)
+        );
+    }
+
+    #[test]
+    fn rejects_ipv4_mapped_unspecified() {
+        assert_eq!(
+            webhook_url_is_safe("https://[::ffff:0.0.0.0]/x"),
+            Err(UnsafeUrlReason::UnspecifiedIp)
+        );
+    }
+
+    #[test]
+    fn allows_ipv4_mapped_public() {
+        // 매핑된 공개 IP는 그대로 허용(IPv4 정책과 일관)
+        assert!(webhook_url_is_safe("https://[::ffff:8.8.8.8]/x").is_ok());
     }
 
     #[test]
