@@ -1,3 +1,4 @@
+pub mod alerts;
 pub mod analytics;
 pub mod blocks;
 pub mod failed_tx;
@@ -7,7 +8,7 @@ pub mod swaps;
 pub mod tokens;
 pub mod traders;
 
-use axum::routing::get;
+use axum::routing::{delete, get, post};
 use axum::Router;
 use sqlx::PgPool;
 use tower_http::cors::CorsLayer;
@@ -52,4 +53,13 @@ fn v1_router() -> Router<PgPool> {
         // failed-tx
         .route("/failed-tx", get(failed_tx::list_failed_tx))
         .route("/failed-tx/{tx_hash}", get(failed_tx::get_failed_tx))
+        // alert subscriptions (S08)
+        .route(
+            "/alert-subscriptions",
+            post(alerts::create_alert_subscription).get(alerts::list_alert_subscriptions),
+        )
+        .route(
+            "/alert-subscriptions/{id}",
+            delete(alerts::deactivate_alert_subscription),
+        )
 }

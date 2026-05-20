@@ -25,3 +25,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
 bigdecimal.workspace = true
+
+# Alerts API (S08-T03)
+hex.workspace = true
+getrandom.workspace = true
