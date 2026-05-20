@@ -89,6 +89,41 @@ query model has no notion of `trace_log.error` because traces aren't part
 of its public dataset. `root_cause` makes that asymmetry directly visible
 to embedding products (S10 of M004).
 
+`failing_function_decoded` resolves the 4-byte `failing_function` selector
+(e.g. `0xa9059cbb`) against our self-owned `function_signature` ABI seed
+table into a human-readable shape:
+
+```jsonc
+"failing_function_decoded": {              // S11 / M004 — null if no match
+  "selector":  "0xa9059cbb",               // always lowercased
+  "name":      "transfer",
+  "signature": "transfer(address,uint256)",
+  "source":    "erc20"                     // 'erc20' | 'uniswap-v3-router' | ...
+}
+```
+
+`null` is explicit (D014) — it means either `failing_function` itself was
+`null` *or* the selector isn't in our seed. The contract guarantees:
+
+- `selector === data.failed.failing_function.toLowerCase()` (self-consistency).
+- `name` and `signature` are non-empty strings.
+
+Why self-owned ABI seed and not 4byte.directory? Two reasons (D015, D008
+spirit):
+
+1. **No runtime third-party dependency.** Production calls don't hit an
+   external endpoint mid-request; the seed lives entirely in our migrations.
+2. **Curated quality.** Public selector databases are full of garbage from
+   typos and collisions. We seed only what we've verified against EIP-20
+   and the Uniswap V3 ABI; an operator extending the seed is a deliberate
+   `INSERT INTO function_signature ... ON CONFLICT DO NOTHING`.
+
+ABI **args** decoding (turning the input bytes into typed values) is
+deliberately *out of scope* for this slice — that's a separate slice (S11.1
+sketch) because it needs the full ABI type system (address / uint / dynamic
+bytes / nested tuples). Name + signature alone is already the high-value
+gain for the dApp developer persona.
+
 ### Response `400` / `404`
 
 A syntactically invalid `tx_hash` (not `0x` + 64 hex) is a **client error →

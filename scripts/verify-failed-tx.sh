@@ -98,6 +98,47 @@ if [ "$gc" = 200 ]; then
   ' || fail=1
 fi
 
+# Assert failing_function_decoded semantics (S11 / M004) — must be either null
+# or an object whose selector equals data.failed.failing_function (lowercased)
+# and whose name/signature are non-empty.
+if [ "$gc" = 200 ]; then
+  node -e '
+    const j = require("/tmp/vftx-good.json");
+    const d = j.data || {};
+    if (!Object.prototype.hasOwnProperty.call(d, "failing_function_decoded")) {
+      console.log("  DECODED FAIL: failing_function_decoded field missing");
+      process.exit(1);
+    }
+    const fd = d.failing_function_decoded;
+    if (fd === null) {
+      console.log("  DECODED OK (null — selector absent or not in self-owned ABI seed)");
+    } else if (typeof fd !== "object") {
+      console.log("  DECODED FAIL: must be null or object, got " + typeof fd);
+      process.exit(1);
+    } else {
+      const fnSelector = d.failed && d.failed.failing_function;
+      if (!fnSelector) {
+        console.log("  DECODED FAIL: decoded object present but failed.failing_function is null");
+        process.exit(1);
+      }
+      if (fd.selector !== fnSelector.toLowerCase()) {
+        console.log("  DECODED FAIL: selector mismatch " + fd.selector + " vs " + fnSelector);
+        process.exit(1);
+      }
+      if (fd.selector !== fd.selector.toLowerCase()) {
+        console.log("  DECODED FAIL: selector must be lowercased"); process.exit(1);
+      }
+      if (typeof fd.name !== "string" || !fd.name.length) {
+        console.log("  DECODED FAIL: name must be non-empty string"); process.exit(1);
+      }
+      if (typeof fd.signature !== "string" || !fd.signature.length) {
+        console.log("  DECODED FAIL: signature must be non-empty string"); process.exit(1);
+      }
+      console.log("  DECODED OK (" + fd.name + " :: " + fd.signature + ")");
+    }
+  ' || fail=1
+fi
+
 echo "BAD  ($BAD_HASH): HTTP $bc"
 if [ "$bc" = 404 ] && grep -q '"error"' /tmp/vftx-bad.json; then
   echo "  PASS"
