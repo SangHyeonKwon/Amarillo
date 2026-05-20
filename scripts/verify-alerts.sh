@@ -30,6 +30,8 @@ fi
 API_PID=$!
 
 CREATED_ID=""
+INITIAL_SECRET=""
+ROTATED_SECRET=""
 cleanup() {
   if [ -n "$CREATED_ID" ]; then
     curl -fsS -X DELETE "http://127.0.0.1:$PORT/v1/alert-subscriptions/$CREATED_ID" >/dev/null 2>&1 || true
@@ -55,15 +57,15 @@ pc=$(curl -s -o /tmp/valerts-create.json -w '%{http_code}' -H 'Content-Type: app
   --data "{\"webhook_url\":\"$WEBHOOK\",\"error_category\":\"SLIPPAGE_EXCEEDED\",\"to_addr\":\"$TO_ADDR\"}")
 echo "POST valid: HTTP $pc"
 if [ "$pc" = 201 ]; then
-  CREATED_ID=$(node -e '
+  read -r CREATED_ID INITIAL_SECRET <<<"$(node -e '
     const j = require("/tmp/valerts-create.json");
     const d = j.data || {};
     if (!d.subscription_id || !d.signing_secret) { console.error("missing fields"); process.exit(1); }
     if (typeof d.signing_secret !== "string" || d.signing_secret.length !== 64) {
       console.error("signing_secret not 64-hex"); process.exit(1);
     }
-    process.stdout.write(String(d.subscription_id));
-  ') || fail=1
+    process.stdout.write(String(d.subscription_id) + " " + d.signing_secret);
+  ')" || fail=1
   echo "  PASS (subscription_id=$CREATED_ID, signing_secret revealed once)"
 else
   echo "  FAIL — expected 201"; cat /tmp/valerts-create.json; fail=1
@@ -115,11 +117,70 @@ else
   echo "  FAIL"; cat /tmp/valerts-list.json; fail=1
 fi
 
+# --- ROTATE secret (HARDEN2-T02): 200 with NEW signing_secret ---
+if [ -n "$CREATED_ID" ]; then
+  rc=$(curl -s -o /tmp/valerts-rot.json -w '%{http_code}' -X POST "$URL/$CREATED_ID/rotate-secret")
+  echo "ROTATE $CREATED_ID: HTTP $rc"
+  if [ "$rc" = 200 ]; then
+    ROTATED_SECRET=$(node -e "
+      const j = require('/tmp/valerts-rot.json');
+      const d = j.data || {};
+      if (typeof d.signing_secret !== 'string' || d.signing_secret.length !== 64) {
+        console.error('rotated signing_secret not 64-hex'); process.exit(1);
+      }
+      if (d.signing_secret === '$INITIAL_SECRET') {
+        console.error('rotated secret equals initial (no rotation happened)'); process.exit(1);
+      }
+      if (d.subscription_id !== Number($CREATED_ID)) {
+        console.error('subscription_id changed unexpectedly'); process.exit(1);
+      }
+      process.stdout.write(d.signing_secret);
+    ") || fail=1
+    echo "  PASS (new secret differs from initial)"
+
+    # GET list still must not leak signing_secret
+    grc=$(curl -s -o /tmp/valerts-list2.json -w '%{http_code}' "$URL?limit=500")
+    if [ "$grc" = 200 ]; then
+      node -e "
+        const j = require('/tmp/valerts-list2.json');
+        for (const s of (j.data || [])) {
+          if ('signing_secret' in s) {
+            console.log('  FAIL: signing_secret leaked in GET after rotate'); process.exit(1);
+          }
+        }
+        console.log('  PASS (no signing_secret leak in GET after rotate)');
+      " || fail=1
+    else
+      echo "  FAIL (GET after rotate: HTTP $grc)"; fail=1
+    fi
+  else
+    echo "  FAIL — expected 200"; cat /tmp/valerts-rot.json; fail=1
+  fi
+fi
+
+# --- ROTATE nonexistent -> 404 ---
+rnc=$(curl -s -o /tmp/valerts-rnx.json -w '%{http_code}' -X POST "$URL/999999999/rotate-secret")
+echo "ROTATE 999999999: HTTP $rnc"
+if [ "$rnc" = 404 ] && grep -q '"error"' /tmp/valerts-rnx.json; then
+  echo "  PASS"
+else
+  echo "  FAIL"; cat /tmp/valerts-rnx.json; fail=1
+fi
+
 # --- DELETE existing -> 204 ---
 if [ -n "$CREATED_ID" ]; then
   dc=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$URL/$CREATED_ID")
   echo "DELETE $CREATED_ID: HTTP $dc"
   if [ "$dc" = 204 ]; then echo "  PASS"; else echo "  FAIL"; fail=1; fi
+
+  # --- ROTATE inactive (just deactivated) -> 404 ---
+  ric=$(curl -s -o /tmp/valerts-rinact.json -w '%{http_code}' -X POST "$URL/$CREATED_ID/rotate-secret")
+  echo "ROTATE $CREATED_ID (inactive): HTTP $ric"
+  if [ "$ric" = 404 ] && grep -q '"error"' /tmp/valerts-rinact.json; then
+    echo "  PASS"
+  else
+    echo "  FAIL"; cat /tmp/valerts-rinact.json; fail=1
+  fi
 
   # --- DELETE same id again -> 404 (already inactive) ---
   d2=$(curl -s -o /tmp/valerts-d2.json -w '%{http_code}' -X DELETE "$URL/$CREATED_ID")

@@ -48,6 +48,43 @@ pub fn sign_payload(secret: &[u8], body: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// 외부 에러 메시지에서 `http(s)://…` URL을 `<redacted-url>`로 치환한다 (순수,
+/// HARDEN2-T01).
+///
+/// `alert_delivery.last_error`에 영구 저장되는 메시지가 webhook URL/내부 IP/
+/// DNS 진단을 누설하지 않도록 보호. URL 종료는 **첫 공백 문자**로 단순 식별 —
+/// 종결자 휴리스틱의 false negative보다 약간의 over-redact를 우선(누설 방지가
+/// 1순위). 스킴이 없는 호스트는 false positive 방지를 위해 손대지 않는다.
+pub(crate) fn redact_urls(input: &str) -> String {
+    const REDACT: &str = "<redacted-url>";
+    let schemes = ["https://", "http://"];
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        let mut next: Option<usize> = None;
+        for s in &schemes {
+            if let Some(p) = rest.find(s) {
+                next = Some(match next {
+                    None => p,
+                    Some(q) => q.min(p),
+                });
+            }
+        }
+        let Some(start) = next else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        let end = after
+            .find(|c: char| c.is_ascii_whitespace())
+            .unwrap_or(after.len());
+        out.push_str(REDACT);
+        rest = &after[end..];
+    }
+    out
+}
+
 /// 디스패처 누적 지표(프로세스 메모리).
 #[derive(Debug, Default, Clone)]
 pub struct DispatchMetrics {
@@ -195,9 +232,11 @@ async fn dispatch_item(
             Ok(DispatchOutcome::Delivered)
         }
         Err(e) => {
-            // 리뷰 L1: 외부 에러 메시지(reqwest)는 URL/IP/내부 진단을 포함할 수
-            // 있어 영구 저장되므로 길이 캡.
-            let err_msg: String = e.to_string().chars().take(500).collect();
+            // 리뷰 L1: 외부 에러 메시지(reqwest)는 URL/IP/내부 진단을 포함해 영구
+            // 저장된다. 순서가 중요: ① redact_urls로 URL 마스킹(HARDEN2-T01),
+            // ② 500자 캡(원본 사이즈 폭주 방어). redact 먼저여야 잘림 직전에
+            // 노출되던 URL 꼬리도 안전.
+            let err_msg: String = redact_urls(&e.to_string()).chars().take(500).collect();
             tracing::warn!(
                 subscription_id = item.subscription_id,
                 tx_hash = %item.tx_hash,
@@ -372,6 +411,59 @@ mod tests {
     }
 
     // ── 본문 빌더 ──────────────────────────────────────────────
+
+    // ── redact_urls (HARDEN2-T01) ─────────────────────────────
+
+    #[test]
+    fn redact_urls_passthrough_when_no_url() {
+        assert_eq!(redact_urls("connection refused"), "connection refused");
+        assert_eq!(redact_urls(""), "");
+    }
+
+    #[test]
+    fn redact_urls_single_https() {
+        assert_eq!(
+            redact_urls("failed: https://example.com/hook"),
+            "failed: <redacted-url>"
+        );
+    }
+
+    #[test]
+    fn redact_urls_handles_http_and_https() {
+        assert_eq!(
+            redact_urls("http://internal/x timed out"),
+            "<redacted-url> timed out"
+        );
+    }
+
+    #[test]
+    fn redact_urls_multiple() {
+        assert_eq!(
+            redact_urls("two: https://a.com and https://b.com here"),
+            "two: <redacted-url> and <redacted-url> here"
+        );
+    }
+
+    #[test]
+    fn redact_urls_url_at_end_with_port_and_path() {
+        assert_eq!(
+            redact_urls("Connection refused on https://10.0.0.1:8080/x"),
+            "Connection refused on <redacted-url>"
+        );
+    }
+
+    #[test]
+    fn redact_urls_no_false_positives() {
+        // 스킴 없는 호스트·식별자는 건드리지 않음
+        assert_eq!(
+            redact_urls("see example.com for details"),
+            "see example.com for details"
+        );
+        assert_eq!(
+            redact_urls("tx_hash=0xabc failed at https://x"),
+            "tx_hash=0xabc failed at <redacted-url>"
+        );
+    }
 
     #[test]
     fn build_payload_is_stable() {

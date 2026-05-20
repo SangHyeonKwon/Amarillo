@@ -114,6 +114,45 @@ Hard delete is intentionally **not** exposed at the HTTP layer — the
 `alert_delivery` history is preserved for auditing (`db::queries::
 delete_alert_subscription` exists but is internal/admin-only).
 
+### `POST /v1/alert-subscriptions/{id}/rotate-secret` — rotate signing secret
+
+Issues a fresh 256-bit signing secret for an **active** subscription
+(HARDEN2-T02). Same one-time-reveal contract as creation: the new
+`signing_secret` is returned in the response and never again. The
+subscription id, webhook url, and filter remain unchanged; only the
+HMAC key changes. The next webhook the dispatcher sends will be signed
+with the new key.
+
+```bash
+curl -fsS -X POST "$BASE/v1/alert-subscriptions/$ID/rotate-secret"
+```
+
+Response **200**:
+
+```json
+{
+  "data": {
+    "subscription_id": 42,
+    "error_category":  "SlippageExceeded",
+    "to_addr":         "0x00…aa",
+    "webhook_url":     "https://example.com/alerts",
+    "signing_secret":  "<new 64-hex chars>",
+    "active":          true,
+    "created_at":      "2026-05-20T11:00:00Z"
+  }
+}
+```
+
+- **404** if the subscription doesn't exist *or* is inactive (rotating
+  an already-deactivated subscription is intentionally disallowed —
+  rotating implies "keep using this subscription with a new key",
+  which contradicts soft-deletion).
+- The DB query is idempotent — calling rotate twice with the same
+  generated secret would land the same row state — but the API layer
+  generates a fresh secret per call, so each invocation actually
+  invalidates the previous one. Use it once on suspected compromise,
+  push the new secret to the receiver immediately.
+
 ## Dispatcher (`indexer --dispatch-alerts`)
 
 Separate mode of the indexer binary (D012 outbox pattern: failure
@@ -207,6 +246,15 @@ signed request on the receiver.
   to a private IP at connect time) is **not** caught by name-based
   rejection alone — connect-time IP check is backlog. Practical risk on
   the indexer's own network: low; not zero.
-- **Secrets**: `signing_secret` is revealed *once* on creation, never in
-  list responses, never logged. `WS_URL` is env-only and also never
-  logged (S07-T02 carryover).
+- **Secrets**: `signing_secret` is revealed *once* on creation **and
+  on rotation** (HARDEN2-T02), never in list responses, never logged.
+  `WS_URL` is env-only and also never logged (S07-T02 carryover).
+- **`last_error` URL masking (HARDEN2-T01)**: reqwest error strings
+  often include the failing URL / resolved IP / internal diagnostics,
+  and they get persisted to `alert_delivery.last_error` (visible via
+  any future admin-list endpoint). Before writing, `redact_urls`
+  replaces every `http(s)://…` (up to the next whitespace) with
+  `<redacted-url>`. The remaining 500-character cap (from HARDEN-T03/L1)
+  bounds total length. Trade-off: this is whitespace-terminated, so a
+  noisy receiver embedding URL fragments inside quotes/parens may
+  over-redact slightly — preferred over under-redaction.

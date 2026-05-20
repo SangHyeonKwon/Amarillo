@@ -287,3 +287,74 @@ async fn alert_claim_is_atomic_and_handles_stale() {
             .expect("delete sub");
     }
 }
+
+/// HARDEN2-T02: `rotate_alert_subscription_secret`의 happy/none/inactive 검증.
+#[tokio::test]
+#[ignore = "requires PostgreSQL: cargo test -p db -- --ignored"]
+async fn alert_secret_rotation_happy_404_inactive() {
+    let pool = db::create_pool(&db_url(), 2).await.expect("connect");
+    db::run_migrations(&pool).await.expect("migrate");
+
+    let sub = db::queries::insert_alert_subscription(
+        &pool,
+        None,
+        None,
+        "https://example.test/rotate-itest",
+        "secret-original",
+    )
+    .await
+    .expect("insert sub");
+
+    // (1) happy: 활성 구독 회전 → 새 시크릿이 DB에 박힘
+    let rotated = db::queries::rotate_alert_subscription_secret(
+        &pool,
+        sub.subscription_id,
+        "secret-rotated-1",
+    )
+    .await
+    .expect("rotate happy");
+    let rotated = rotated.expect("active sub should rotate");
+    assert_eq!(rotated.signing_secret, "secret-rotated-1");
+    assert_eq!(rotated.subscription_id, sub.subscription_id);
+    assert!(rotated.active);
+
+    // (2) 멱등: 같은 시크릿 재호출도 정상 (DB 상태 동일)
+    let again = db::queries::rotate_alert_subscription_secret(
+        &pool,
+        sub.subscription_id,
+        "secret-rotated-1",
+    )
+    .await
+    .expect("rotate idempotent");
+    assert_eq!(
+        again.expect("active sub").signing_secret,
+        "secret-rotated-1"
+    );
+
+    // (3) 미존재 ID → None (API가 404로 매핑)
+    let nope = db::queries::rotate_alert_subscription_secret(&pool, 999_999_999, "x")
+        .await
+        .expect("rotate nonexistent");
+    assert!(nope.is_none(), "missing subscription must rotate to None");
+
+    // (4) 비활성 → None (소프트-삭제된 구독엔 회전 금지)
+    db::queries::deactivate_alert_subscription(&pool, sub.subscription_id)
+        .await
+        .expect("deactivate");
+    let inactive = db::queries::rotate_alert_subscription_secret(
+        &pool,
+        sub.subscription_id,
+        "secret-after-deactivate",
+    )
+    .await
+    .expect("rotate inactive");
+    assert!(
+        inactive.is_none(),
+        "inactive subscription must rotate to None"
+    );
+
+    // teardown
+    db::queries::delete_alert_subscription(&pool, sub.subscription_id)
+        .await
+        .expect("delete sub");
+}

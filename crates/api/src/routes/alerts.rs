@@ -160,3 +160,34 @@ pub async fn deactivate_alert_subscription(
     }
     Ok(StatusCode::NO_CONTENT)
 }
+
+/// 활성 구독의 `signing_secret`을 회전한다 (HARDEN2-T02). **새 시크릿은 응답에서
+/// 1회만** 노출(생성과 동일 계약). 미존재 또는 비활성 구독 → 404 — 비활성 구독에
+/// 회전을 허용하지 않는 것은 운영 안전(소프트-삭제된 구독을 재활성화시키지 않음).
+///
+/// 사용 흐름: 시크릿 분실/노출 의심 → 본 엔드포인트 호출 → 응답의 새 시크릿을
+/// 수신측에 즉시 갱신 → 이 시각 이후의 webhook은 새 시크릿으로 서명되어 도착.
+pub async fn rotate_alert_subscription_secret(
+    State(pool): State<PgPool>,
+    Path(id): Path<i64>,
+) -> Result<Json<ApiResponse<AlertSubscriptionCreated>>, ApiError> {
+    let new_secret = generate_signing_secret()?;
+    let row = db::queries::rotate_alert_subscription_secret(&pool, id, &new_secret)
+        .await?
+        .ok_or_else(|| {
+            ApiError::NotFound(format!(
+                "alert subscription {id} (not found or inactive — cannot rotate)"
+            ))
+        })?;
+
+    let created = AlertSubscriptionCreated {
+        subscription_id: row.subscription_id,
+        error_category: row.error_category,
+        to_addr: row.to_addr,
+        webhook_url: row.webhook_url,
+        signing_secret: row.signing_secret,
+        active: row.active,
+        created_at: row.created_at,
+    };
+    Ok(Json(ApiResponse { data: created }))
+}
