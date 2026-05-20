@@ -155,10 +155,17 @@ in `alert_delivery` with `status='delivered'`:
   re-claimable after 60 s. `find_pending_alert_matches`'s anti-join
   shares the same staleness window so the two functions stay in lock-
   step — no SELECT-then-POST race window left.
-- **Per-cycle POSTs are still sequential** (HARDEN-T03 will introduce
-  bounded parallelism via `tokio::JoinSet`). Today: batch 100 × 10 s
-  timeout ⇒ a fully pending sweep can take ~17 min before the next
-  sleep, and `Ctrl-C` is only honored between sweeps.
+- **Bounded parallelism (HARDEN-T03/M2)**: `dispatch_once` now runs up
+  to `MAX_CONCURRENT_POSTS` (= 10) POSTs concurrently via
+  `tokio::task::JoinSet` — prime-N + drain-refill keeps the count at
+  the cap. Worst-case sweep time drops from `batch × timeout` (~17 min
+  at 100×10s) to roughly `batch / N × timeout` (~1.7 min), bounded by
+  receiver responsiveness. A panicking task is logged and counted as
+  `failed`; the cycle continues with the rest (alerts are
+  best-effort).
+- **Ctrl-C granularity**: still honored between cycles (existing
+  `tokio::select!` at the wait phase). Cancellation *inside* a running
+  POST is bounded by `REQUEST_TIMEOUT_SECS` (= 10 s).
 
 ## Verification
 
