@@ -119,9 +119,13 @@ rewinds the checkpoint — then re-indexes on the next iteration.
   explicit. (An earlier draft of this doc / D010 / S06-SUMMARY mislabeled the
   old 64-window behavior as a safe "conservative over-delete"; that was a
   review-R1 honesty fix, and S07-T03 then removed the gap itself.)
-- R3/R4 (per-iteration range cap; Ctrl-C responsiveness *inside*
-  `index_range`) remain S07 backlog — hardening refinements, not correctness
-  gaps (see `.gsd/S07-PLAN.md`).
+- **R3/R4 — REALIZED (HARDEN-T01)**: follow caps a single cycle at
+  `FOLLOW_CYCLE_BLOCK_CAP` (= 500 blocks; pure `cap_range_to`) so that
+  reorg checks keep running even when the checkpoint is far behind, and
+  `index_range` checks a cancellation flag between chunks so Ctrl-C
+  during a backfill stops at the next chunk boundary (≤ `batch_size`
+  blocks of additional work) with per-chunk checkpoint preserving
+  partial progress. Larger ranges naturally resume on subsequent cycles.
 
 ## Verification
 
