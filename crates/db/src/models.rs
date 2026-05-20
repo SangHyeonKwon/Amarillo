@@ -421,8 +421,8 @@ pub struct PoolStats {
 /// 단건 실패 트랜잭션 진단 결과.
 ///
 /// API 조립용 합성 구조체 — 테이블/뷰가 아니다. `failed_transaction` 1행과
-/// 해당 tx의 평탄화된 `trace_log` 콜트리(1:N), 그리고 `root_cause`(첫 error
-/// frame)를 함께 담는다.
+/// 해당 tx의 평탄화된 `trace_log` 콜트리(1:N), `root_cause`(첫 error frame),
+/// 그리고 `failing_function_decoded`(selector → 이름/시그니처)를 함께 담는다.
 #[derive(Debug, Clone, Serialize)]
 pub struct FailedTxDetail {
     /// 실패 트랜잭션 메타 + 분류 결과
@@ -435,6 +435,11 @@ pub struct FailedTxDetail {
     /// 가장 빠른(`trace_id ASC`) 1행 (= pre-order DFS 첫 error). 매칭 frame이
     /// 없으면 `null` (S10 / M004; silent default 금지 — 명시 `null` 노출).
     pub root_cause: Option<TraceLog>,
+    /// `failed.failing_function` selector를 자기소유 ABI 시드(`function_signature`)
+    /// 와 lookup해 사람이 읽는 함수명/시그니처로 가산 (S11 / M004). 매칭이 없거나
+    /// `failing_function` 자체가 `None`이면 `null` (silent default 금지 — D015/D014).
+    /// args 디코딩은 별 슬라이스(S11.1 sketch).
+    pub failing_function_decoded: Option<DecodedFunction>,
 }
 
 /// 실패 추이 시계열의 한 점 (failed_tx_timeseries).
@@ -531,4 +536,48 @@ pub struct FailedTxByLabelPoint {
     pub address: String,
     pub total_failures: i64,
     pub by_category: std::collections::HashMap<String, i64>,
+}
+
+/// 4-byte function selector → 사람이 읽는 이름/시그니처 매핑 (S11 / M004).
+///
+/// 자기소유 ABI 시드(`migrations/20240106000001_add_function_signature.sql`)에서
+/// 채워진다. `/v1/failed-tx/{tx_hash}` 응답의 `failing_function`(selector)을
+/// 즉시 사람이 읽는 함수명/시그니처로 식별 가능하게 — args 디코딩은 별 슬라이스
+/// (S11.1 sketch, D015 일관).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct FunctionSignature {
+    /// 4-byte selector — lowercased hex (`0x` + 8 hex chars).
+    pub selector: String,
+    /// 함수명 (예: `transfer`).
+    pub name: String,
+    /// ABI signature (예: `transfer(address,uint256)`).
+    pub signature: String,
+    /// 시드 출처 (`erc20` | `uniswap-v3-router` | ...).
+    pub source: Option<String>,
+    /// 시드/등록 시각.
+    pub created_at: DateTime<Utc>,
+}
+
+/// `FailedTxDetail.failing_function_decoded`용 합성 — 응답 직렬화 전용 (S11 / M004).
+///
+/// `failing_function`(4-byte selector) lookup 성공 시 [`FunctionSignature`]에서
+/// 발췌(생성 시각 등 내부 컬럼 제외). 매칭 없음은 `None` (silent default 금지;
+/// S10/D014 일관).
+#[derive(Debug, Clone, Serialize)]
+pub struct DecodedFunction {
+    pub selector: String,
+    pub name: String,
+    pub signature: String,
+    pub source: Option<String>,
+}
+
+impl From<FunctionSignature> for DecodedFunction {
+    fn from(fs: FunctionSignature) -> Self {
+        Self {
+            selector: fs.selector,
+            name: fs.name,
+            signature: fs.signature,
+            source: fs.source,
+        }
+    }
 }

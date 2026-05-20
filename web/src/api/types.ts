@@ -134,7 +134,23 @@ export interface TraceLog {
   trace_id: number;
 }
 
-/** `GET /v1/failed-tx/{tx_hash}` payload (S01 + S04 N+1 truncation, S10 root_cause). */
+/**
+ * S11 / M004 — 4-byte selector resolved against the self-owned `function_signature`
+ * ABI seed into a human-readable function name/signature. ABI args decoding is a
+ * separate slice (S11.1 sketch, D015).
+ */
+export interface DecodedFunction {
+  /** Lowercased `0x` + 8 hex (matches `data.failed.failing_function`). */
+  selector: string;
+  /** Function name, e.g. `transfer`. */
+  name: string;
+  /** ABI signature, e.g. `transfer(address,uint256)`. */
+  signature: string;
+  /** Seed origin (`erc20` | `uniswap-v3-router` | …); `null` when not tagged. */
+  source: string | null;
+}
+
+/** `GET /v1/failed-tx/{tx_hash}` payload (S01 + S04 truncation, S10 root_cause, S11 decoded fn). */
 export interface FailedTxDetail {
   failed: FailedTransaction;
   call_tree: TraceLog[];
@@ -147,6 +163,13 @@ export interface FailedTxDetail {
    * (silent default is intentionally not allowed; see `.gsd/DECISIONS.md` D014).
    */
   root_cause: TraceLog | null;
+  /**
+   * `data.failed.failing_function` (4-byte selector) resolved against the
+   * self-owned `function_signature` ABI seed (S11 / M004). `null` is explicit
+   * — either the selector itself was `null`, or no seed row matched. Args
+   * decoding is deliberately out of scope (D015).
+   */
+  failing_function_decoded: DecodedFunction | null;
 }
 
 /** One bucket of the failure timeseries (`failed_tx_timeseries`, S03). */

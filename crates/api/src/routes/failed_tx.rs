@@ -41,12 +41,23 @@ pub async fn get_failed_tx(
     }
     let root_cause = db::queries::get_first_error_frame(&pool, &tx_hash).await?;
 
+    // S11 / M004: failing_function (selector) → 사람이 읽는 이름/시그니처 lookup.
+    // `failing_function`이 None이거나 selector 매칭이 없으면 명시 `null` (silent
+    // default 금지 — D014/D015 일관).
+    let failing_function_decoded = match failed.failing_function.as_deref() {
+        Some(selector) => db::queries::get_function_signature(&pool, selector)
+            .await?
+            .map(db::models::DecodedFunction::from),
+        None => None,
+    };
+
     Ok(Json(ApiResponse {
         data: db::models::FailedTxDetail {
             failed,
             call_tree,
             call_tree_truncated,
             root_cause,
+            failing_function_decoded,
         },
     }))
 }
