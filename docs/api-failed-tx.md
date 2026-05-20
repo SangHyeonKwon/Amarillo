@@ -168,6 +168,65 @@ Unknown `interval`, or non-RFC3339 `from`/`to`:
 { "error": "invalid `interval` (hour|day|week): bogus" }
 ```
 
+## `GET /v1/analytics/failed-tx/by-label` — Failures by labeled contract (S09 / M003)
+
+Joins on-chain failure data (`failed_transaction × transaction`) with the
+**off-chain** `contract_label` table (a private mapping `address → human
+label` that we store ourselves) to expose **failure distribution per labeled
+contract**. This is the M003 "on-chain × private-data join" example —
+exactly the kind of question Dune can't answer because Dune has no access to
+your private label store.
+
+Query parameters (all optional):
+
+| Param   | Type        | Default | Meaning |
+|---------|-------------|---------|---------|
+| `from`  | RFC3339     | none    | Inclusive lower time bound (else: any) |
+| `to`    | RFC3339     | none    | Inclusive upper time bound (else: any) |
+| `owner` | text        | none    | Tenancy filter — empty/absent = all labels; otherwise must equal `contract_label.owner_id` |
+| `limit` | integer     | 50      | Clamped 1..=200; rows are `total_failures` DESC |
+
+Response: `ApiResponse<FailedTxByLabelPoint[]>` where each row is
+
+```json
+{
+  "label": "Uniswap V3 SwapRouter",
+  "address": "0xe592427a0aece92de3edee1f18e0157c05861564",
+  "total_failures": 47,
+  "by_category": { "SLIPPAGE_EXCEEDED": 31, "UNKNOWN": 16 }
+}
+```
+
+Pivot invariant: `sum(by_category) === total_failures` (verified by
+`scripts/verify-failed-tx-by-label.sh`). `address` is always lowercased
+0x + 40 hex (the `contract_label` PK convention).
+
+Errors:
+
+- non-RFC3339 `from`/`to` → **400** `{ "error": "invalid `from` …" }`
+- unknown `owner` (no matching tenant) → **200** with `{ "data": [] }`
+- empty result (no labels or no matching failures) → **200** with `{ "data": [] }`
+
+### Where labels come from
+
+The migration `migrations/20240105000001_add_contract_label.sql` seeds:
+
+- The Uniswap V3 SwapRouter + Factory addresses (global, `owner_id IS NULL`).
+- One label per existing `pool` row (`"<pair_name> (pool)"`).
+
+Operators add their own labels via the (admin-only) `insert_contract_label`
+DB function; an authenticated HTTP surface is intentionally **out of scope**
+for the demo (D013, D008 spirit).
+
+### Why this is the moat
+
+Dune queries every dataset that's *publicly indexed*. Your label set is
+*consumer-specific*: which contracts you deployed, which counterparties you
+care about, which user IDs your KYC system already knows. The endpoint above
+shows a single concrete instance (contract labels); the same pattern fits
+bot-operator self-labels or exchange KYC mapping by swapping the off-chain
+table — same join, different private side.
+
 ## Verify
 
 ```bash
@@ -177,7 +236,11 @@ docker compose run --rm seed
 # HTTP layer: end-to-end via the running api (200 seeded / order / 404)
 ./scripts/verify-failed-tx.sh
 
-# DB layer: query + invariants (incl. trace pre-order regression guard)
+# By-label endpoint: shape + invariants + 400 + empty tenant (S09 / M003)
+./scripts/verify-failed-tx-by-label.sh    # set API_PORT=… if 3001 is taken
+
+# DB layer: query + invariants (incl. trace pre-order regression guard
+# + label aggregate / owner filter / future-window emptiness)
 cargo test -p db -- --ignored
 ```
 

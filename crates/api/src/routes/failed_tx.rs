@@ -144,3 +144,35 @@ pub async fn failed_tx_timeseries(
     let points = db::queries::failed_tx_timeseries(&pool, &bucket, from, to).await?;
     Ok(Json(ApiResponse { data: points }))
 }
+
+/// `GET /v1/analytics/failed-tx/by-label` 쿼리 파라미터 (S09 / M003).
+#[derive(Deserialize)]
+pub struct FailedTxByLabelQuery {
+    /// 시작 시각, RFC3339 (선택)
+    pub from: Option<String>,
+    /// 종료 시각, RFC3339 (선택)
+    pub to: Option<String>,
+    /// 테넌시 필터 — 빈 문자열/생략은 "모든 라벨"(공개 + 모든 테넌트)
+    pub owner: Option<String>,
+    /// 결과 행 수 (기본 50, 최대 200)
+    pub limit: Option<i64>,
+}
+
+/// 라벨된 컨트랙트별 실패 분포를 반환한다 (S09 / M003).
+///
+/// `contract_label × transaction × failed_transaction` 조인 결과를 (라벨, 주소)
+/// 별로 그루핑해 `total_failures` + 카테고리 카운트 맵으로 노출. 잘못된 RFC3339는
+/// 400, 빈 결과는 200 + 빈 배열. **Dune이 구조적으로 못 하는** 비공개 라벨 조인의
+/// 단일 시연 엔드포인트.
+pub async fn failed_tx_by_label(
+    State(pool): State<PgPool>,
+    Query(q): Query<FailedTxByLabelQuery>,
+) -> Result<Json<ApiResponse<Vec<db::models::FailedTxByLabelPoint>>>, ApiError> {
+    let from = parse_ts(q.from.as_deref(), "from")?;
+    let to = parse_ts(q.to.as_deref(), "to")?;
+    let owner = q.owner.as_deref().filter(|s| !s.is_empty());
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+
+    let rows = db::queries::failed_tx_by_label_aggregate(&pool, owner, from, to, limit).await?;
+    Ok(Json(ApiResponse { data: rows }))
+}

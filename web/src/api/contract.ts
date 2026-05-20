@@ -8,6 +8,7 @@ import type {
   ErrorCategory,
   FailedTransaction,
   FailedTxAnalysis,
+  FailedTxByLabelPoint,
   FailedTxDetail,
   FailedTxTrendPoint,
   PaginatedResponse,
@@ -427,6 +428,42 @@ export function parseFailedTxTimeseriesEnvelope(
     }
     return data.map((item, idx) =>
       parseFailedTxTrendPoint(item, `${path}[${idx}]`),
+    );
+  });
+}
+
+function parseFailedTxByLabelPoint(
+  value: unknown,
+  path: string,
+): FailedTxByLabelPoint {
+  const obj = readRecord(value, path);
+  const bcRaw = obj.by_category;
+  if (!isRecord(bcRaw)) {
+    throw new Error(
+      `Invalid contract at ${path}.by_category: expected object.`,
+    );
+  }
+  const by_category: Record<string, number> = {};
+  for (const [k, v] of Object.entries(bcRaw)) {
+    by_category[k] = readInteger(v, `${path}.by_category.${k}`);
+  }
+  return {
+    label: readString(obj.label, `${path}.label`),
+    address: readString(obj.address, `${path}.address`),
+    total_failures: readInteger(obj.total_failures, `${path}.total_failures`),
+    by_category,
+  };
+}
+
+export function parseFailedTxByLabelEnvelope(
+  value: unknown,
+): ApiResponse<FailedTxByLabelPoint[]> {
+  return parseApiResponse(value, (data, path) => {
+    if (!Array.isArray(data)) {
+      throw new Error(`Invalid contract at ${path}: expected array.`);
+    }
+    return data.map((item, idx) =>
+      parseFailedTxByLabelPoint(item, `${path}[${idx}]`),
     );
   });
 }

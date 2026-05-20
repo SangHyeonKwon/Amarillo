@@ -497,3 +497,33 @@ pub struct AlertMatch {
     /// 본문 서명용 HMAC 키
     pub signing_secret: String,
 }
+
+/// Off-chain `address → human label` 매핑 (S09 / M003).
+///
+/// Dune이 구조적으로 못 하는 "비공개 라벨 × 온체인 데이터" 조인의 기반. 라벨은
+/// 공개(`owner_id = NULL`)이거나 테넌트별(`owner_id`)이 될 수 있고, 분석 엔드포인트
+/// 는 `transaction.to_addr` 를 키로 JOIN 한다.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct ContractLabel {
+    /// 소문자 0x + 40 hex (`transaction.to_addr`와 매칭)
+    pub address: String,
+    /// 사람이 읽는 라벨
+    pub label: String,
+    /// 테넌시 힌트 — `None` = 공개/전역 라벨
+    pub owner_id: Option<String>,
+    /// 등록 시각
+    pub created_at: DateTime<Utc>,
+}
+
+/// 라벨된 컨트랙트 1개의 실패 분포(`failed_tx_by_label_aggregate`).
+///
+/// `by_category`는 `{ "SLIPPAGE_EXCEEDED": 3, "UNKNOWN": 1, ... }` 형태의 카테고리
+/// 별 카운트. SQL 측에서 한 행씩 (label, address, category) 그루핑 결과를 받아
+/// 호출자가 Rust에서 피벗한다 — `sqlx`의 `json` 피처 무도입(스코프 단속).
+#[derive(Debug, Clone, Serialize)]
+pub struct FailedTxByLabelPoint {
+    pub label: String,
+    pub address: String,
+    pub total_failures: i64,
+    pub by_category: std::collections::HashMap<String, i64>,
+}

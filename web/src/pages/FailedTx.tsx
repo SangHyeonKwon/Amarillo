@@ -17,6 +17,7 @@ import {
 
 import {
   useFailedTxAnalysis,
+  useFailedTxByLabel,
   useFailedTxDetail,
   useFailedTxList,
   useFailedTxTimeseries,
@@ -26,6 +27,7 @@ import {
   type ErrorCategory,
   type FailedTransaction,
   type FailedTxAnalysis,
+  type FailedTxByLabelPoint,
 } from "@/api/types";
 import { AsyncState } from "@/components/AsyncState";
 import { type Column, DataTable } from "@/components/DataTable";
@@ -155,6 +157,9 @@ export function FailedTx() {
   const trendQuery = useFailedTxTimeseries({ interval, from: fromIso, to: toIso });
   const trendPoints = trendQuery.data ?? [];
 
+  const byLabelQuery = useFailedTxByLabel({ from: fromIso, to: toIso, limit: 20 });
+  const byLabelData = byLabelQuery.data ?? [];
+
   const detailQuery = useFailedTxDetail(selectedTx || undefined);
   const detail = detailQuery.data;
 
@@ -187,6 +192,52 @@ export function FailedTx() {
 
   const source = searchParams.get("source");
   const sourcePool = searchParams.get("pool");
+
+  const byLabelColumns: Column<FailedTxByLabelPoint>[] = [
+    {
+      header: "Label",
+      cell: (r) => <span>{r.label}</span>,
+    },
+    {
+      header: "Address",
+      cell: (r) => (
+        <span className="mono" title={r.address}>
+          {r.address.slice(0, 10)}…{r.address.slice(-6)}
+        </span>
+      ),
+    },
+    {
+      header: "Total failures",
+      align: "right",
+      cell: (r) => formatCompact(r.total_failures),
+    },
+    {
+      header: "Distribution",
+      cell: (r) => (
+        <span
+          className="toolbar"
+          style={{ flexWrap: "wrap", gap: 4, justifyContent: "flex-start" }}
+        >
+          {Object.entries(r.by_category)
+            .sort(([, a], [, b]) => b - a)
+            .slice(0, 4)
+            .map(([cat, count]) => (
+              <span
+                key={cat}
+                className="badge"
+                style={{
+                  color: errorCategoryColor(cat as ErrorCategory),
+                  borderColor: errorCategoryColor(cat as ErrorCategory),
+                  fontSize: 11,
+                }}
+              >
+                {errorCategoryLabel(cat as ErrorCategory)} {count}
+              </span>
+            ))}
+        </span>
+      ),
+    },
+  ];
 
   const listColumns: Column<FailedTransaction>[] = [
     {
@@ -559,6 +610,31 @@ export function FailedTx() {
             caption="Failed transaction category breakdown"
             onRowClick={(row) => setFilters({ category: row.error_category, offset: "0" })}
           />
+        </div>
+
+        <div className="card">
+          <div className="card-head">
+            <div className="card-title">Failures by labeled contract</div>
+            <div className="card-sub">
+              `/v1/analytics/failed-tx/by-label` (S09 / M003) — joins live
+              failures against our private `contract_label` store. Dune can't
+              see the right side of this join.
+            </div>
+          </div>
+          <AsyncState
+            isLoading={byLabelQuery.isLoading}
+            isError={byLabelQuery.isError}
+            error={byLabelQuery.error}
+            isEmpty={byLabelData.length === 0}
+            emptyLabel="No label-joinable failures in this window (seed labels exist but no matching failed_transaction · transaction.to_addr pairs)."
+          >
+            <DataTable
+              columns={byLabelColumns}
+              rows={byLabelData}
+              rowKey={(r) => r.address}
+              caption="Failures by labeled contract"
+            />
+          </AsyncState>
         </div>
 
         <div className="card">

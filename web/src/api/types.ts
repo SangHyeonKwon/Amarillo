@@ -154,6 +154,22 @@ export type TimeBucket = "hour" | "day" | "week";
 
 export const TIME_BUCKETS: TimeBucket[] = ["hour", "day", "week"];
 
+/**
+ * `/v1/analytics/failed-tx/by-label` — failure distribution per labeled
+ * contract (S09 / M003 "on-chain × off-chain join" demo). The aggregator
+ * pivots category counts into `by_category` so consumers can render a
+ * compact distribution without re-aggregating. Pivot invariant:
+ * `sum(Object.values(by_category)) === total_failures`.
+ */
+export interface FailedTxByLabelPoint {
+  label: string;
+  /** Lowercased 0x + 40 hex; matches `transaction.to_addr`. */
+  address: string;
+  total_failures: number;
+  /** `{ "SLIPPAGE_EXCEEDED": 3, "UNKNOWN": 1, ... }` — per-category counts. */
+  by_category: Record<string, number>;
+}
+
 // ── Alert subscriptions (S08 + HARDEN2) ─────────────────────────────
 
 /**
