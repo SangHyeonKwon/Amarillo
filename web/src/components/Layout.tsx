@@ -8,6 +8,7 @@ const NAV = [
   { to: "/pools", label: "Pools", icon: "[]" },
   { to: "/failed-tx", label: "Failed Tx", icon: "!" },
   { to: "/traders", label: "Top Traders", icon: "$" },
+  { to: "/alerts", label: "Alerts", icon: "~" },
 ];
 
 /** App chrome: sidebar nav + sticky topbar with live API status. */
