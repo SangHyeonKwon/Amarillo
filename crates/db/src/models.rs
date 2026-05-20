@@ -37,6 +37,23 @@ impl std::str::FromStr for ErrorCategory {
     }
 }
 
+impl ErrorCategory {
+    /// SCREAMING_SNAKE_CASE 와이어 표현 문자열을 반환한다.
+    ///
+    /// DB enum 컬럼 / API 쿼리 파라미터 / `category_diagnosis` 시드 키 모두 같은
+    /// 와이어 형태를 쓴다 — 호출 측이 그 변환을 자체 구현하지 않도록 단일 출처.
+    pub fn as_wire(&self) -> &'static str {
+        match self {
+            Self::InsufficientBalance => "INSUFFICIENT_BALANCE",
+            Self::SlippageExceeded => "SLIPPAGE_EXCEEDED",
+            Self::DeadlineExpired => "DEADLINE_EXPIRED",
+            Self::Unauthorized => "UNAUTHORIZED",
+            Self::TransferFailed => "TRANSFER_FAILED",
+            Self::Unknown => "UNKNOWN",
+        }
+    }
+}
+
 /// 시계열 버킷 단위 — `date_trunc`에 쓰일 화이트리스트(인젝션 방지).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -440,6 +457,11 @@ pub struct FailedTxDetail {
     /// `failing_function` 자체가 `None`이면 `null` (silent default 금지 — D015/D014).
     /// args 디코딩은 별 슬라이스(S11.1 sketch).
     pub failing_function_decoded: Option<DecodedFunction>,
+    /// `failed.error_category` wire form으로 `category_diagnosis` 시드 lookup
+    /// 결과 — 사람이 읽는 진단 메시지 + 추천 액션 (S12 / M004). 시드되지 않은
+    /// 카테고리는 `null` (silent default 금지 — D016/D014). enum 자체 세분화는
+    /// 별 슬라이스(S12.1 sketch).
+    pub diagnosis: Option<Diagnosis>,
 }
 
 /// 실패 추이 시계열의 한 점 (failed_tx_timeseries).
@@ -578,6 +600,48 @@ impl From<FunctionSignature> for DecodedFunction {
             name: fs.name,
             signature: fs.signature,
             source: fs.source,
+        }
+    }
+}
+
+/// 카테고리별 진단 메시지 + 추천 액션 (S12 / M004).
+///
+/// 자기소유 시드(`migrations/20240107000001_add_category_diagnosis.sql`)에서
+/// 채워진다. `/v1/failed-tx/{tx_hash}` 응답에서 dApp 개발자가 "왜 실패했나 +
+/// 어떻게 고치나"를 한 호출에 받게 한다. enum 자체 세분화는 별 슬라이스
+/// (S12.1 sketch, D016 일관).
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct CategoryDiagnosis {
+    /// ErrorCategory enum wire form (예: `SLIPPAGE_EXCEEDED`).
+    pub error_category: String,
+    /// 진단 메시지 (왜 실패했나).
+    pub message: String,
+    /// 추천 액션 (어떻게 고치나) — 선택.
+    pub recommended_action: Option<String>,
+    /// 시드 출처 (예: `builtin`) — 운영자 후속 시드 구분.
+    pub source: Option<String>,
+    /// 시드/등록 시각.
+    pub created_at: DateTime<Utc>,
+}
+
+/// `FailedTxDetail.diagnosis`용 합성 — 응답 직렬화 전용 (S12 / M004).
+///
+/// `error_category`로 [`CategoryDiagnosis`] lookup 성공 시 발췌. 응답 컨텍스트가
+/// 이미 카테고리를 보유하므로 `error_category`/`created_at`은 제외. 매칭 없음은
+/// `None` (silent default 금지; S10/S11/D014 일관).
+#[derive(Debug, Clone, Serialize)]
+pub struct Diagnosis {
+    pub message: String,
+    pub recommended_action: Option<String>,
+    pub source: Option<String>,
+}
+
+impl From<CategoryDiagnosis> for Diagnosis {
+    fn from(cd: CategoryDiagnosis) -> Self {
+        Self {
+            message: cd.message,
+            recommended_action: cd.recommended_action,
+            source: cd.source,
         }
     }
 }
