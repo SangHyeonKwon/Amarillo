@@ -58,9 +58,41 @@ Response **201**:
 on the field). Persist it on the receiving side immediately — the only
 recovery for a lost secret is to create a new subscription.
 
-Verify the webhook on the receiver: read `X-Amarillo-Signature: sha256=<hex>`,
-compute `HMAC-SHA256(signing_secret_bytes, raw_request_body_bytes)`, and
-compare in constant time.
+### Verifying the signature on the receiver
+
+The string in the response is a **64-character lowercase hex** encoding of
+a **32-byte secret**. The dispatcher uses the **32 raw bytes** (hex-
+*decoded*) as the HMAC key, not the 64 ASCII hex characters. Receivers
+must hex-decode before HMAC-ing or signatures will not match.
+
+Read `X-Amarillo-Signature: sha256=<hex>`, hex-decode the stored
+`signing_secret` to 32 bytes, then `HMAC-SHA256(key_bytes,
+raw_request_body_bytes)`, and compare **in constant time** against the
+header's hex value.
+
+Node (≥18, no extra deps):
+
+```js
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const key = Buffer.from(STORED_HEX_SECRET, "hex"); // 32 bytes
+const got = req.header("X-Amarillo-Signature").replace(/^sha256=/, "");
+const want = createHmac("sha256", key).update(rawBody).digest("hex");
+if (got.length !== want.length || !timingSafeEqual(Buffer.from(got), Buffer.from(want))) {
+  throw new Error("invalid signature");
+}
+```
+
+Python (stdlib only):
+
+```py
+import hmac, hashlib
+key = bytes.fromhex(STORED_HEX_SECRET)                 # 32 bytes
+got = request.headers["X-Amarillo-Signature"].removeprefix("sha256=")
+want = hmac.new(key, raw_body, hashlib.sha256).hexdigest()
+if not hmac.compare_digest(got, want):
+    raise ValueError("invalid signature")
+```
 
 ### `GET /v1/alert-subscriptions?limit=…` — list
 
@@ -109,6 +141,20 @@ in `alert_delivery` with `status='delivered'`:
      anti-join keeps the row pending so it retries next sweep).
 
 `Ctrl-C` stops between sweeps cleanly.
+
+**Operational constraints (honest):**
+
+- **Run a single dispatcher.** `find_pending_alert_matches` (SELECT) and
+  `record_alert_delivery` (UPSERT) are *not* atomic; two dispatchers can
+  pick the same `(subscription, tx)` and both POST before either records
+  a delivered row. `alert_delivery`'s composite PK still prevents
+  duplicate rows, but the webhook fires twice. Worker-claim semantics
+  (e.g. `SELECT … FOR UPDATE SKIP LOCKED`) are backlog — until then,
+  deploy exactly one `--dispatch-alerts` process.
+- **Per-cycle POSTs are sequential.** Batch 100 × 10 s timeout ⇒ a fully
+  pending sweep can take ~17 min before the next sleep, and `Ctrl-C` is
+  only honored between sweeps. Bounded parallelism (`buffer_unordered`)
+  is backlog; current behaviour fits "small N of subscribers".
 
 ## Verification
 
