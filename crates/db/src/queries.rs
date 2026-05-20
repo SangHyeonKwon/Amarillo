@@ -958,13 +958,18 @@ pub async fn deactivate_alert_subscription(
 
 /// 아직 전송되지 않은 (활성 구독 × 매칭 실패 tx) 쌍을 최대 `limit`개 반환한다.
 ///
-/// 매칭: `error_category`/`to_addr`가 NULL이면 해당 조건은 "모두 매칭". 멱등의
-/// 핵심은 `alert_delivery`에 `status='delivered'`로 기록된 쌍을 anti-join으로
-/// 제외하는 것 — 이미 전송된 알림은 다시 잡히지 않는다(실패분은 재시도됨).
+/// 매칭: `error_category`/`to_addr`가 NULL이면 해당 조건은 "모두 매칭".
+/// **멱등 anti-join**: `alert_delivery`에서
+/// (a) `status='delivered'` — 영구 제외, 또는
+/// (b) `status='claimed'` 이고 `created_at`이 `stale_after_secs` 이내 — 다른
+///     워커가 현재 처리 중이라 제외(HARDEN-T02). `stale_after_secs`가 지나면
+///     워커가 죽은 것으로 간주, 다시 매칭에 포함 → 재claim 가능.
+/// `status='failed'`는 항상 포함(재시도).
 #[tracing::instrument(skip(pool))]
 pub async fn find_pending_alert_matches(
     pool: &PgPool,
     limit: i64,
+    stale_after_secs: i64,
 ) -> Result<Vec<AlertMatch>, DbError> {
     let rows = sqlx::query_as::<_, AlertMatch>(
         "SELECT s.subscription_id, f.tx_hash, s.webhook_url, s.signing_secret
@@ -978,12 +983,15 @@ pub async fn find_pending_alert_matches(
                  SELECT 1 FROM alert_delivery d
                  WHERE d.subscription_id = s.subscription_id
                    AND d.tx_hash = f.tx_hash
-                   AND d.status = 'delivered'
+                   AND (d.status = 'delivered'
+                        OR (d.status = 'claimed'
+                            AND d.created_at > NOW() - ($2::int * INTERVAL '1 second')))
                )
          ORDER BY f.tx_hash
          LIMIT $1",
     )
     .bind(limit)
+    .bind(stale_after_secs)
     .fetch_all(pool)
     .await?;
     Ok(rows)
@@ -1037,4 +1045,45 @@ pub async fn delete_alert_subscription(
         .execute(pool)
         .await?;
     Ok(res.rows_affected())
+}
+
+/// 한 (구독 × tx) 쌍에 대한 전송 권리를 **원자적으로 claim** 한다 (HARDEN-T02).
+///
+/// `INSERT … ON CONFLICT DO UPDATE WHERE`로 락 없이 한 문장에서 보장한다:
+/// - 새로운 쌍 → 새 'claimed' 행 INSERT → `true`
+/// - 기존 `status='failed'` → 'claimed'로 다시 매겨 재시도 → `true`
+/// - 기존 `status='claimed'` 이고 `created_at < NOW() - stale_after_secs`
+///   (워커가 잡고서 죽은 상황) → 'claimed'로 갱신 → `true`
+/// - 기존 `status='delivered'` 또는 fresh `status='claimed'` (다른 워커 진행 중)
+///   → WHERE 미일치 → 0행 영향 → `false`
+///
+/// PK `(subscription_id, tx_hash)`가 원자성 보장 — 두 워커가 동시에 같은 쌍을
+/// claim 시도해도 정확히 한쪽만 `true`를 받는다. HTTP POST는 락 밖에서 수행.
+#[tracing::instrument(skip(pool))]
+pub async fn try_claim_alert_match(
+    pool: &PgPool,
+    subscription_id: i64,
+    tx_hash: &str,
+    stale_after_secs: i64,
+) -> Result<bool, DbError> {
+    let res = sqlx::query(
+        "INSERT INTO alert_delivery
+             (subscription_id, tx_hash, status, attempts, last_error, delivered_at, created_at)
+         VALUES ($1, $2, 'claimed', 1, NULL, NULL, NOW())
+         ON CONFLICT (subscription_id, tx_hash) DO UPDATE
+             SET status = 'claimed',
+                 attempts = alert_delivery.attempts + 1,
+                 last_error = NULL,
+                 delivered_at = NULL,
+                 created_at = NOW()
+             WHERE alert_delivery.status = 'failed'
+                OR (alert_delivery.status = 'claimed'
+                    AND alert_delivery.created_at < NOW() - ($3::int * INTERVAL '1 second'))",
+    )
+    .bind(subscription_id)
+    .bind(tx_hash)
+    .bind(stale_after_secs)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected() == 1)
 }

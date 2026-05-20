@@ -10,6 +10,8 @@ const DEFAULT_URL: &str = "postgres://defi:defi@localhost:5432/defi_analytics";
 const BLOCK: i64 = 98_000_001; // seed max(~18M) 위 + rollback 테스트(99M)와도 분리
 const TXH: &str = "0xa1e7000000000000000000000000000000000000000000000000000000000001";
 const TO: &str = "0x00000000000000000000000000000000000000aa";
+/// dispatcher의 운영 기본값과 일치(=60s).
+const STALE_AFTER_SECS: i64 = 60;
 
 fn db_url() -> String {
     std::env::var("DATABASE_URL").unwrap_or_else(|_| DEFAULT_URL.to_string())
@@ -87,7 +89,7 @@ async fn alert_match_is_idempotent_and_scoped() {
     .await
     .expect("insert sub_other");
 
-    let m = db::queries::find_pending_alert_matches(&pool, 1000)
+    let m = db::queries::find_pending_alert_matches(&pool, 1000, STALE_AFTER_SECS)
         .await
         .expect("matches");
     assert!(
@@ -103,7 +105,7 @@ async fn alert_match_is_idempotent_and_scoped() {
     db::queries::record_alert_delivery(&pool, sub_match.subscription_id, TXH, true, None)
         .await
         .expect("record delivered");
-    let m2 = db::queries::find_pending_alert_matches(&pool, 1000)
+    let m2 = db::queries::find_pending_alert_matches(&pool, 1000, STALE_AFTER_SECS)
         .await
         .expect("matches2");
     assert!(
@@ -134,7 +136,7 @@ async fn alert_match_is_idempotent_and_scoped() {
     )
     .await
     .expect("record failed");
-    let m3 = db::queries::find_pending_alert_matches(&pool, 1000)
+    let m3 = db::queries::find_pending_alert_matches(&pool, 1000, STALE_AFTER_SECS)
         .await
         .expect("matches3");
     assert!(
@@ -146,7 +148,7 @@ async fn alert_match_is_idempotent_and_scoped() {
     db::queries::deactivate_alert_subscription(&pool, sub_retry.subscription_id)
         .await
         .expect("deactivate");
-    let m4 = db::queries::find_pending_alert_matches(&pool, 1000)
+    let m4 = db::queries::find_pending_alert_matches(&pool, 1000, STALE_AFTER_SECS)
         .await
         .expect("matches4");
     assert!(
@@ -171,5 +173,117 @@ async fn alert_match_is_idempotent_and_scoped() {
         db::queries::update_checkpoint(&pool, 1, p)
             .await
             .expect("restore checkpoint");
+    }
+}
+
+/// HARDEN-T02: outbox claim의 원자성·재시도·stale-회복 검증.
+///
+/// `try_claim_alert_match`의 4 시나리오 — new / fresh-claimed 충돌 /
+/// stale-claimed 재claim / failed 재claim / delivered는 영구 차단. `find_pending`
+/// 자체는 본 테스트와 결합 없이 검증되므로 여기선 claim semantics만 본다.
+#[tokio::test]
+#[ignore = "requires PostgreSQL: cargo test -p db -- --ignored"]
+async fn alert_claim_is_atomic_and_handles_stale() {
+    let pool = db::create_pool(&db_url(), 2).await.expect("connect");
+    db::run_migrations(&pool).await.expect("migrate");
+
+    // 시나리오별로 분리된 sub 행 — 한쪽 claim이 다른 쪽에 영향 안 줌.
+    let s_new = db::queries::insert_alert_subscription(
+        &pool,
+        None,
+        None,
+        "https://example.test/claim-new",
+        "secret-cnew",
+    )
+    .await
+    .expect("insert s_new");
+    let s_delivered = db::queries::insert_alert_subscription(
+        &pool,
+        None,
+        None,
+        "https://example.test/claim-delivered",
+        "secret-cdel",
+    )
+    .await
+    .expect("insert s_delivered");
+    let s_failed = db::queries::insert_alert_subscription(
+        &pool,
+        None,
+        None,
+        "https://example.test/claim-failed",
+        "secret-cfail",
+    )
+    .await
+    .expect("insert s_failed");
+
+    const TX: &str = "0xc1a1ec0000000000000000000000000000000000000000000000000000000001";
+
+    // (1) New row: claim → true
+    assert!(
+        db::queries::try_claim_alert_match(&pool, s_new.subscription_id, TX, STALE_AFTER_SECS)
+            .await
+            .expect("claim new"),
+        "신규 (sub, tx) claim은 true여야"
+    );
+
+    // (2) 같은 행 즉시 재시도(fresh): WHERE 미일치로 false
+    assert!(
+        !db::queries::try_claim_alert_match(&pool, s_new.subscription_id, TX, STALE_AFTER_SECS)
+            .await
+            .expect("re-claim fresh"),
+        "fresh-claimed 재시도는 false여야(다른 워커 진행 중과 동치)"
+    );
+
+    // (3) stale_after=0 → 어떤 claimed도 즉시 stale, 재claim true (워커 crash 복구)
+    assert!(
+        db::queries::try_claim_alert_match(&pool, s_new.subscription_id, TX, 0)
+            .await
+            .expect("re-claim stale"),
+        "stale_after=0이면 fresh-claimed도 재claim 가능(crash 복구)"
+    );
+
+    // (4) delivered → 영구 차단 (stale=0 이어도 false)
+    db::queries::try_claim_alert_match(&pool, s_delivered.subscription_id, TX, STALE_AFTER_SECS)
+        .await
+        .expect("initial claim s_delivered");
+    db::queries::record_alert_delivery(&pool, s_delivered.subscription_id, TX, true, None)
+        .await
+        .expect("mark delivered");
+    assert!(
+        !db::queries::try_claim_alert_match(&pool, s_delivered.subscription_id, TX, 0)
+            .await
+            .expect("post-delivered claim"),
+        "delivered는 stale 무관 영구 차단"
+    );
+
+    // (5) failed → 재claim 항상 true (재시도 트리거)
+    db::queries::try_claim_alert_match(&pool, s_failed.subscription_id, TX, STALE_AFTER_SECS)
+        .await
+        .expect("initial claim s_failed");
+    db::queries::record_alert_delivery(
+        &pool,
+        s_failed.subscription_id,
+        TX,
+        false,
+        Some("connection refused"),
+    )
+    .await
+    .expect("mark failed");
+    assert!(
+        db::queries::try_claim_alert_match(&pool, s_failed.subscription_id, TX, STALE_AFTER_SECS)
+            .await
+            .expect("post-failed claim"),
+        "failed는 fresh stale 무관 재claim(재시도)"
+    );
+
+    // teardown — CASCADE가 alert_delivery 정리
+    for s in [
+        s_new.subscription_id,
+        s_delivered.subscription_id,
+        s_failed.subscription_id,
+    ] {
+        db::queries::delete_alert_subscription(&pool, s)
+            .await
+            .expect("delete sub");
     }
 }
