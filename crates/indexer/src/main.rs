@@ -158,7 +158,11 @@ async fn main() -> anyhow::Result<()> {
         config.batch_size,
     );
 
-    worker_pool.index_range(from_block, to_block).await?;
+    // 고정-범위 모드는 외부 cancellation 없이 끝까지 진행 — 영구 false 플래그.
+    let no_cancel = std::sync::atomic::AtomicBool::new(false);
+    worker_pool
+        .index_range(from_block, to_block, &no_cancel)
+        .await?;
 
     tracing::info!("indexer finished successfully");
     Ok(())

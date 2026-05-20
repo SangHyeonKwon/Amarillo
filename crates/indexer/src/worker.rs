@@ -1,4 +1,5 @@
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -45,16 +46,33 @@ impl WorkerPool {
 
     /// 지정된 블록 범위를 인덱싱한다.
     ///
-    /// 블록 범위를 `batch_size` 단위 청크로 분할하고,
-    /// `tokio::JoinSet`으로 병렬 수집한다.
-    #[tracing::instrument(skip(self))]
-    pub async fn index_range(&self, from_block: u64, to_block: u64) -> anyhow::Result<()> {
+    /// 블록 범위를 `batch_size` 단위 청크로 분할하고, `tokio::JoinSet`으로 병렬
+    /// 수집한다. 청크 사이마다 `cancel` 플래그를 확인해 ctrl_c 등 외부 신호에
+    /// **청크 경계에서** 정상 종료한다(HARDEN-T01/R4). 체크포인트는 청크 단위로
+    /// 박혀 있어 조기 종료해도 부분 진행이 보존된다. 취소가 필요 없는 호출자는
+    /// `&AtomicBool::new(false)`를 넘기면 종래 동작과 동일.
+    #[tracing::instrument(skip(self, cancel))]
+    pub async fn index_range(
+        &self,
+        from_block: u64,
+        to_block: u64,
+        cancel: &AtomicBool,
+    ) -> anyhow::Result<()> {
         tracing::info!(from_block, to_block, "starting block range indexing");
 
         let total = to_block.saturating_sub(from_block) + 1;
         let mut processed = 0u64;
 
         for chunk_start in (from_block..=to_block).step_by(self.batch_size) {
+            if cancel.load(Ordering::Relaxed) {
+                tracing::info!(
+                    from_block,
+                    to_block,
+                    processed,
+                    "cancellation requested — stopping index_range at chunk boundary"
+                );
+                return Ok(());
+            }
             let chunk_end = (chunk_start + self.batch_size as u64 - 1).min(to_block);
             self.process_chunk(chunk_start, chunk_end).await?;
 
@@ -92,6 +110,19 @@ impl WorkerPool {
         );
 
         let mut m = FollowMetrics::default();
+
+        // Cancellation watcher (HARDEN-T01/R4): ctrl_c가 도착하면 공유 flag를
+        // 켠다. `index_range`가 청크 사이에서 이 flag를 확인해 거대한 백필
+        // 사이클이라도 빠르게 graceful 종료. wait phase의 `tokio::select!`는
+        // 종전대로 사이클 사이의 즉시 종료를 따로 처리한다(중복 안전).
+        let cancel = Arc::new(AtomicBool::new(false));
+        {
+            let cancel = Arc::clone(&cancel);
+            tokio::spawn(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                cancel.store(true, Ordering::Relaxed);
+            });
+        }
 
         // 트리거: 구독 모드면 newHeads 틱 채널을 띄운다. 연결/구독 실패나
         // 스트림 종료 시 채널이 닫혀 자동으로 폴링으로 폴백한다(무회귀, D011).
@@ -132,12 +163,28 @@ impl WorkerPool {
             let mut indexed_this_cycle = 0u64;
             match next_target(head, confirmations, checkpoint) {
                 Some((from, to)) => {
-                    tracing::info!(head, from, to, "following: indexing new range");
-                    self.index_range(from, to).await?;
-                    indexed_this_cycle = (to - from) + 1;
+                    // 사이클당 범위 cap(HARDEN-T01/R3) — 거대한 lag에서도 reorg
+                    // 체크가 자주 돌고 ctrl_c 응답성 유지. 잔여는 다음 사이클.
+                    let (from_c, to_c) = cap_range_to(from, to, FOLLOW_CYCLE_BLOCK_CAP);
+                    let capped = to_c < to;
+                    tracing::info!(
+                        head,
+                        from = from_c,
+                        to = to_c,
+                        capped,
+                        "following: indexing new range"
+                    );
+                    self.index_range(from_c, to_c, cancel.as_ref()).await?;
+                    indexed_this_cycle = (to_c - from_c) + 1;
                     m.blocks_indexed += indexed_this_cycle;
                 }
                 None => tracing::debug!(head, "following: no new confirmed blocks"),
+            }
+
+            // 인덱싱 중 ctrl_c가 들어왔으면 wait phase 없이 즉시 종료(R4).
+            if cancel.load(Ordering::Relaxed) {
+                tracing::info!("cancellation observed — stopping follow loop");
+                break;
             }
 
             // 사이클당 구조화 관측 1줄: lag·처리량·reorg·마지막 폴 시각.
@@ -666,6 +713,23 @@ struct FollowMetrics {
     last_reorg_depth: u64,
 }
 
+/// 한 사이클에 인덱싱할 범위를 cap에 맞춰 자른다(HARDEN-T01/R3, 순수).
+///
+/// `to - from + 1 ≤ cap_blocks` 이면 원본 그대로, 아니면 `(from, from+cap-1)`.
+/// `cap_blocks == 0` 또는 `to < from` 이면 자르지 않음(no-op). `u64` 산술은
+/// saturating으로 처리해 tip 부근 오버플로 안전.
+pub fn cap_range_to(from: u64, to: u64, cap_blocks: u64) -> (u64, u64) {
+    if cap_blocks == 0 || to < from {
+        return (from, to);
+    }
+    let span = to.saturating_sub(from).saturating_add(1);
+    if span <= cap_blocks {
+        return (from, to);
+    }
+    let capped_to = from.saturating_add(cap_blocks).saturating_sub(1);
+    (from, capped_to)
+}
+
 /// follow 루프의 순수 결정 함수 — 다음에 인덱싱할 블록 범위.
 ///
 /// `safe = head - confirmations` (얕은 reorg 완화, D009). 체크포인트가 있으면
@@ -693,6 +757,15 @@ pub fn next_target(
 /// 약 13.6h) — PoS finality(≈64)의 64배 마진. 로컬(자체 DB)은 한 번에 로드해도
 /// 저렴하고, 체인 해시는 lazy 조회라 정상 시 RPC 비용은 cap과 무관(R2).
 pub const REORG_SCAN_CAP: i64 = 4096;
+
+/// follow 한 사이클이 한번에 인덱싱할 수 있는 블록 수 상한 (HARDEN-T01/R3).
+///
+/// 큰 lag에서 체크포인트가 한참 뒤처진 상태로 follow를 시작하면 `next_target`이
+/// 거대한 범위를 반환해 `index_range`가 길게 도는 동안 ① reorg 체크가 지연되고
+/// ② ctrl_c 응답성도 떨어진다. 사이클당 이 cap만큼만 처리하고 다음 사이클로
+/// 넘겨 head 재조회·reorg 재검사 + 조기 graceful 종료 여유를 만든다. cap을
+/// 넘는 범위는 자연스레 후속 사이클에서 이어 처리된다.
+pub const FOLLOW_CYCLE_BLOCK_CAP: u64 = 500;
 
 /// [`classify_fork`]의 판정 결과.
 #[derive(Debug, PartialEq, Eq)]
@@ -843,7 +916,8 @@ fn spawn_head_ticks(ws_url: String) -> tokio::sync::mpsc::Receiver<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_fork, next_scan_depth, next_target, resolve_trigger_mode, ForkScan, TriggerMode,
+        cap_range_to, classify_fork, next_scan_depth, next_target, resolve_trigger_mode, ForkScan,
+        TriggerMode,
     };
 
     fn h(s: &str) -> String {
@@ -934,6 +1008,41 @@ mod tests {
     #[test]
     fn classify_empty_local_is_no_reorg() {
         assert_eq!(classify_fork(&[], |_| Some(h("x")), 8), ForkScan::NoReorg);
+    }
+
+    #[test]
+    fn cap_range_to_smaller_than_cap_returns_full() {
+        assert_eq!(cap_range_to(100, 200, 500), (100, 200));
+    }
+
+    #[test]
+    fn cap_range_to_equal_cap_returns_full() {
+        // 정확히 cap(500블록)일 때는 자르지 않음
+        assert_eq!(cap_range_to(100, 599, 500), (100, 599));
+    }
+
+    #[test]
+    fn cap_range_to_larger_than_cap_truncates() {
+        assert_eq!(cap_range_to(100, 5000, 500), (100, 599));
+    }
+
+    #[test]
+    fn cap_range_to_single_block() {
+        assert_eq!(cap_range_to(100, 100, 500), (100, 100));
+    }
+
+    #[test]
+    fn cap_range_to_cap_zero_is_noop() {
+        // cap_blocks == 0 → 자르지 않음(테스트/특수 호출자용 탈출구)
+        assert_eq!(cap_range_to(100, 5000, 0), (100, 5000));
+    }
+
+    #[test]
+    fn cap_range_to_saturating_near_u64_max() {
+        // tip 부근 산술 안전성 — saturating로 오버플로 방지
+        let from = u64::MAX - 2;
+        let to = u64::MAX;
+        assert_eq!(cap_range_to(from, to, 500), (from, to));
     }
 
     #[test]
