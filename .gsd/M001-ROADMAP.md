@@ -90,7 +90,15 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
     (D004 일관, silent default 금지) + DB lookup + 핸들러 가산 + 통합테스트 4 +
     verify DECODED semantics + 프론트 KPI 갱신. **D015** (args 분리, 자기시드 정책).
 - [ ] **S11.1 — args 디코딩 + root_cause input 디코드** `[sketch]` `[edge: weak-spot]`
-- [ ] **S12 — 카테고리 세분화 v2 + 진단 메시지/추천액션** `[sketch]` `[edge: weak-spot]`
+- [x] **S12 — 카테고리 진단 메시지 + 추천 액션** `[edge: weak-spot]` · risk: low-med · **DONE** → S12-SUMMARY.md
+  - `category_diagnosis(error_category PK, message, recommended_action?, source?)`
+    멱등 + 6 카테고리 시드(UNKNOWN/INSUFFICIENT_BALANCE/SLIPPAGE_EXCEEDED/
+    DEADLINE_EXPIRED/UNAUTHORIZED/TRANSFER_FAILED) 모두 source='builtin'
+  - `FailedTxDetail.diagnosis: Diagnosis | null` 가산 (D004 일관, silent default 금지)
+    + `ErrorCategory::as_wire()` public 메서드 + DB lookup + 핸들러 가산 + 통합테스트 3
+    + verify DIAG semantics(시드된 카테고리는 non-null 의미 단언) + 프론트 강조 블록.
+    **D016** (스코프: 메시지+액션, enum 세분화는 S12.1).
+- [ ] **S12.1 — error_category enum 세분화 (v2)** `[sketch]` `[edge: weak-spot]`
 - [ ] **S13 — 개발자 SDK/문서** `[sketch]` — TS/Python 미니멈 클라이언트 + cookbook (프로덕트화)
 
 ---

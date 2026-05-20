@@ -139,6 +139,57 @@ if [ "$gc" = 200 ]; then
   ' || fail=1
 fi
 
+# Assert diagnosis semantics (S12 / M004) — must be either null or an object.
+# For seeded categories (the 6 ErrorCategory variants in SCREAMING_SNAKE), it
+# must be non-null with a non-empty message (the migration seed guarantees it).
+if [ "$gc" = 200 ]; then
+  node -e '
+    const SEEDED = new Set([
+      "INSUFFICIENT_BALANCE", "SLIPPAGE_EXCEEDED", "DEADLINE_EXPIRED",
+      "UNAUTHORIZED", "TRANSFER_FAILED", "UNKNOWN",
+    ]);
+    // Serde may emit the variant name ("Unknown") or the wire form
+    // ("UNKNOWN") depending on enum tagging. Canonicalize for the check.
+    const canon = (v) => {
+      if (typeof v === "string") {
+        return v.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toUpperCase();
+      }
+      if (v && typeof v === "object") {
+        const k = Object.keys(v)[0];
+        return k ? canon(k) : "";
+      }
+      return "";
+    };
+    const j = require("/tmp/vftx-good.json");
+    const d = j.data || {};
+    if (!Object.prototype.hasOwnProperty.call(d, "diagnosis")) {
+      console.log("  DIAG FAIL: diagnosis field missing"); process.exit(1);
+    }
+    const dg = d.diagnosis;
+    if (dg !== null && typeof dg !== "object") {
+      console.log("  DIAG FAIL: must be null or object, got " + typeof dg);
+      process.exit(1);
+    }
+    if (dg !== null) {
+      if (typeof dg.message !== "string" || !dg.message.length) {
+        console.log("  DIAG FAIL: message must be non-empty string"); process.exit(1);
+      }
+      // recommended_action and source: string or null (no other types).
+      for (const k of ["recommended_action", "source"]) {
+        if (dg[k] !== null && typeof dg[k] !== "string") {
+          console.log("  DIAG FAIL: " + k + " must be string or null"); process.exit(1);
+        }
+      }
+    }
+    const cat = canon(d.failed && d.failed.error_category);
+    if (SEEDED.has(cat) && dg === null) {
+      console.log("  DIAG FAIL: seeded category " + cat + " must yield non-null diagnosis");
+      process.exit(1);
+    }
+    console.log("  DIAG OK (" + (dg ? "msg=\"" + dg.message.slice(0, 40) + "…\"" : "null") + ")");
+  ' || fail=1
+fi
+
 echo "BAD  ($BAD_HASH): HTTP $bc"
 if [ "$bc" = 404 ] && grep -q '"error"' /tmp/vftx-bad.json; then
   echo "  PASS"

@@ -3,8 +3,8 @@ use sqlx::PgPool;
 
 use crate::error::DbError;
 use crate::models::{
-    AlertMatch, AlertSubscription, Block, ContractLabel, DailySwapVolume, ErrorCategory,
-    FailedTransaction, FailedTxAnalysis, FailedTxByLabelPoint, FailedTxTrendPoint,
+    AlertMatch, AlertSubscription, Block, CategoryDiagnosis, ContractLabel, DailySwapVolume,
+    ErrorCategory, FailedTransaction, FailedTxAnalysis, FailedTxByLabelPoint, FailedTxTrendPoint,
     FunctionSignature, LiquidityEvent, LiquidityEventType, Pool, PoolStats, PriceSnapshot,
     SnapshotInterval, SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader, TraceLog,
     Transaction, UserProfile,
@@ -1218,6 +1218,31 @@ pub async fn failed_tx_by_label_aggregate(
         out.truncate(limit as usize);
     }
     Ok(out)
+}
+
+// ============================================
+// Category diagnosis (S12 / M004) — error_category → message + recommended_action
+// ============================================
+
+/// `error_category` (SCREAMING_SNAKE wire form) → 자기소유 진단 시드 lookup (S12 / M004).
+///
+/// `error_category_wire`는 `"SLIPPAGE_EXCEEDED"` 등 (`ErrorCategory` enum의 wire form).
+/// 정확 매칭. 미존재 → `None` — silent default 금지(호출자가 명시 `null`로 직렬화, D014).
+#[tracing::instrument(skip(pool))]
+pub async fn get_category_diagnosis(
+    pool: &PgPool,
+    error_category_wire: &str,
+) -> Result<Option<CategoryDiagnosis>, DbError> {
+    let row = sqlx::query_as::<_, CategoryDiagnosis>(
+        "SELECT error_category, message, recommended_action, source, created_at
+         FROM category_diagnosis
+         WHERE error_category = $1
+         LIMIT 1",
+    )
+    .bind(error_category_wire)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
 }
 
 // ============================================

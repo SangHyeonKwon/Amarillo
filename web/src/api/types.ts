@@ -150,6 +150,21 @@ export interface DecodedFunction {
   source: string | null;
 }
 
+/**
+ * S12 / M004 — category-level diagnosis seeded for each ErrorCategory variant.
+ * `error_category` itself isn't repeated here — the response context already
+ * carries it under `data.failed.error_category`. Enum subdivision is a
+ * separate slice (S12.1 sketch, D016).
+ */
+export interface Diagnosis {
+  /** Human-readable explanation: *why* the transaction failed. */
+  message: string;
+  /** Suggested next step (e.g. "Increase slippage tolerance."); `null` when not seeded. */
+  recommended_action: string | null;
+  /** Seed origin (e.g. `builtin`); `null` when not tagged. */
+  source: string | null;
+}
+
 /** `GET /v1/failed-tx/{tx_hash}` payload (S01 + S04 truncation, S10 root_cause, S11 decoded fn). */
 export interface FailedTxDetail {
   failed: FailedTransaction;
@@ -170,6 +185,14 @@ export interface FailedTxDetail {
    * decoding is deliberately out of scope (D015).
    */
   failing_function_decoded: DecodedFunction | null;
+  /**
+   * `data.failed.error_category` resolved against the `category_diagnosis`
+   * seed (S12 / M004) — message + recommended_action for the dApp developer.
+   * `null` is explicit (silent default forbidden, D014 / D016): all six current
+   * ErrorCategory variants ship seeded, so non-null whenever the category
+   * matches a seed row.
+   */
+  diagnosis: Diagnosis | null;
 }
 
 /** One bucket of the failure timeseries (`failed_tx_timeseries`, S03). */

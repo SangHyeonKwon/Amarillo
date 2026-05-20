@@ -124,6 +124,32 @@ sketch) because it needs the full ABI type system (address / uint / dynamic
 bytes / nested tuples). Name + signature alone is already the high-value
 gain for the dApp developer persona.
 
+`diagnosis` answers "*why* did it fail, and what should I do about it?" by
+joining `data.failed.error_category` against the self-owned
+`category_diagnosis` seed (S12 / M004):
+
+```jsonc
+"diagnosis": {                              // S12 / M004 — null if category not seeded
+  "message":            "The trade output was below the minimum acceptable amount (price slippage).",
+  "recommended_action": "Increase slippage tolerance, or split the trade to reduce price impact.",
+  "source":             "builtin"
+}
+```
+
+All six current `ErrorCategory` variants (`UNKNOWN`, `INSUFFICIENT_BALANCE`,
+`SLIPPAGE_EXCEEDED`, `DEADLINE_EXPIRED`, `UNAUTHORIZED`, `TRANSFER_FAILED`)
+ship seeded with `source: "builtin"`, so for any classified failure
+`diagnosis` is non-null. `null` is still the contract for categories an
+operator hasn't seeded yet — silent default is intentionally not allowed
+(D014).
+
+Operators tune the messaging by `INSERT INTO category_diagnosis (...) ON
+CONFLICT (error_category) DO UPDATE SET ...` — same self-owned seed
+philosophy as `function_signature` (D015 / D016). enum *subdivision* (e.g.
+`SLIPPAGE_EXCEEDED` → `SLIPPAGE_PRICE_IMPACT` / `SLIPPAGE_AMOUNT_OUT`) is a
+separate slice (S12.1 sketch) — it requires migrating the Postgres enum and
+extending the classifier rules, which is a context-1 unit on its own.
+
 ### Response `400` / `404`
 
 A syntactically invalid `tx_hash` (not `0x` + 64 hex) is a **client error →

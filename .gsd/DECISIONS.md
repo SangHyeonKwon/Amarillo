@@ -200,3 +200,27 @@
   실측: `failing_function`이 이미 인덱서 루트 frame input 첫 4바이트로 채워짐
   (`crates/indexer/src/worker.rs:597`). 그 selector를 lookup해 가산만 하면 됨.
   라이브 메인넷 자동 회귀 부재 — 자기 시드 selector로 의미 단언.
+
+## D016 — S12 스코프: 진단 메시지/추천 액션(까지), 카테고리 세분화는 별 슬라이스
+- **결정**: S12(카테고리 진단 깊이)의 1차 스코프는 **카테고리별 진단 메시지 +
+  추천 액션 시드 + 응답 가산**까지. 기존 `error_category` enum 값(`UNKNOWN` /
+  `SLIPPAGE_EXCEEDED` 등 6개)은 그대로 두고 *진단 텍스트와 추천 액션*만 추가.
+  enum 자체의 세분화(예: `SLIPPAGE_EXCEEDED` → `SLIPPAGE_PRICE_IMPACT` /
+  `SLIPPAGE_AMOUNT_OUT`)는 별 슬라이스(`S12.1` sketch).
+- **이유**: enum 세분화는 마이그레이션(`ALTER TYPE`) + classifier 룰 확장 +
+  Rust enum 변형(non-exhaustive 이슈) + 프론트 type union + 시드 데이터 분류
+  영향으로 *그 자체로 한 유닛 이상*. 진단 메시지/추천 액션은 기존 카테고리
+  6개에 대해 시드 1행씩 + 응답 1필드 가산 — *즉시 dApp 개발자에게 액션 가능*.
+  D014 일관: 단건 응답이 누적적으로 똑똑해짐 (S10 어디서 → S11 어떤 함수 →
+  S12 왜+어떻게).
+- **스코프**: D003 동결 유지. 시드는 자기소유(`category_diagnosis` 멱등 + 6
+  카테고리 1행씩). 외부 의존 미도입(D008/D015 정신). `category_diagnosis
+  (error_category PK TEXT, message, recommended_action?, source?, created_at)`
+  TEXT PK로 단순화 — Postgres enum 컬럼 회피해 마이그레이션 영향 최소화.
+- **트레이드오프**: 카테고리가 6개로 "조잡"하다는 한계가 남음(예: 모든
+  `UNAUTHORIZED` 케이스가 같은 메시지). enum 세분화로 정밀도 ↑는 후속
+  슬라이스(`S12.1`) 호흡 — 본 슬라이스는 *추천 액션의 기본선*을 박는다.
+- **검증 제약(D009~D015 일관)**: 통합테스트 (시드 6행 lookup) + verify HTTP
+  (`diagnosis` 필드 존재 + null|object + 시드된 카테고리에 대한 의미 단언) +
+  clippy/fmt + web typecheck/test/build. 라이브 메인넷 자동 회귀 부재 — 자기
+  시드 카테고리로 의미 단언.

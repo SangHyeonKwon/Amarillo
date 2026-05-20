@@ -117,6 +117,7 @@ describe("api/contract", () => {
         call_tree_truncated: true,
         root_cause: null,
         failing_function_decoded: null,
+        diagnosis: null,
       },
     });
 
@@ -174,6 +175,7 @@ describe("api/contract", () => {
           trace_id: 4,
         },
         failing_function_decoded: null,
+        diagnosis: null,
       },
     });
     expect(parsed.data.root_cause).not.toBeNull();
@@ -261,6 +263,7 @@ describe("api/contract", () => {
           signature: "transfer(address,uint256)",
           source: "erc20",
         },
+        diagnosis: null,
       },
     });
     expect(parsed.data.failing_function_decoded).not.toBeNull();
@@ -318,6 +321,86 @@ describe("api/contract", () => {
         },
       }),
     ).toThrow(/name/);
+  });
+
+  // ── S12 / M004: diagnosis ─────────────────────────────────────
+
+  it("failed-tx detail parses diagnosis as object with message + recommended_action", () => {
+    const parsed = parseFailedTxDetailEnvelope({
+      data: {
+        failed: {
+          tx_hash: "0xdead",
+          error_category: "SlippageExceeded",
+          revert_reason: null,
+          failing_function: null,
+          gas_used: 21000,
+          timestamp: "2025-01-01T00:00:00Z",
+        },
+        call_tree: [],
+        call_tree_truncated: false,
+        root_cause: null,
+        failing_function_decoded: null,
+        diagnosis: {
+          message: "Trade output was below the minimum acceptable amount.",
+          recommended_action: "Increase slippage tolerance.",
+          source: "builtin",
+        },
+      },
+    });
+    expect(parsed.data.diagnosis).not.toBeNull();
+    expect(parsed.data.diagnosis!.message).toMatch(/Trade output/);
+    expect(parsed.data.diagnosis!.recommended_action).toBe(
+      "Increase slippage tolerance.",
+    );
+    expect(parsed.data.diagnosis!.source).toBe("builtin");
+  });
+
+  it("failed-tx detail rejects missing diagnosis key (silent default forbidden)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: null,
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          root_cause: null,
+          failing_function_decoded: null,
+          // diagnosis intentionally omitted
+        },
+      }),
+    ).toThrow(/diagnosis/);
+  });
+
+  it("failed-tx detail throws on malformed diagnosis (message non-string)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: null,
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          root_cause: null,
+          failing_function_decoded: null,
+          diagnosis: {
+            message: 12345, // not a string
+            recommended_action: null,
+            source: null,
+          },
+        },
+      }),
+    ).toThrow(/message/);
   });
 
   it("parses failed-tx list with TotalPaginatedResponse (filter-adjusted total)", () => {

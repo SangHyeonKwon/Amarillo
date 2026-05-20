@@ -51,6 +51,13 @@ pub async fn get_failed_tx(
         None => None,
     };
 
+    // S12 / M004: error_category → 사람이 읽는 진단 메시지 + 추천 액션 lookup.
+    // `as_wire()`로 SCREAMING_SNAKE form 변환(단일 출처). 시드 미존재 카테고리는
+    // 명시 `null` (silent default 금지 — D014/D016 일관). enum 세분화는 S12.1.
+    let diagnosis = db::queries::get_category_diagnosis(&pool, failed.error_category.as_wire())
+        .await?
+        .map(db::models::Diagnosis::from);
+
     Ok(Json(ApiResponse {
         data: db::models::FailedTxDetail {
             failed,
@@ -58,6 +65,7 @@ pub async fn get_failed_tx(
             call_tree_truncated,
             root_cause,
             failing_function_decoded,
+            diagnosis,
         },
     }))
 }
