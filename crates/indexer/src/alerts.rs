@@ -30,6 +30,11 @@ const DISPATCH_BATCH: i64 = 100;
 /// `find_pending_alert_matches` 의 anti-join도 같은 값을 사용 — 두 함수가 한
 /// 기준을 공유해야 동일 row가 한 워커에게만 보임.
 const CLAIM_STALE_AFTER_SECS: i64 = 60;
+/// 한 사이클 안에 동시에 진행할 수 있는 webhook POST 수의 상한 (HARDEN-T03/M2).
+/// 직렬일 때 워스트케이스 `DISPATCH_BATCH × REQUEST_TIMEOUT_SECS` (100×10s=17min)을
+/// `~MAX_CONCURRENT_POSTS`배 단축한다. 수신자 부하·로컬 file descriptor·DB 풀
+/// 사이즈의 균형점. 너무 키우면 한 receiver에 thundering herd가 가능 — 보수적 기본값.
+const MAX_CONCURRENT_POSTS: usize = 10;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -101,10 +106,124 @@ async fn post_signed(
     }
 }
 
-/// 디스패처 1사이클: 배치를 가져와 각 매칭에 SSRF 검증 → 서명 → POST → 멱등 기록.
+/// 단일 매칭 항목 처리 결과 — 병렬 orchestrator가 [`DispatchMetrics`]에 집계.
+#[derive(Debug, PartialEq, Eq)]
+enum DispatchOutcome {
+    Delivered,
+    Failed,
+    UnsafeUrl,
+    ClaimSkipped,
+}
+
+/// 한 매칭 항목의 전 과정: claim → SSRF 가드 → 서명 → POST → 멱등 기록.
+/// `pool`/`client`는 소유 인자로 받아 `'static` 미래로 spawn 가능(HARDEN-T03/M2).
+async fn dispatch_item(
+    pool: PgPool,
+    client: reqwest::Client,
+    item: AlertMatch,
+) -> Result<DispatchOutcome> {
+    let claimed = db::queries::try_claim_alert_match(
+        &pool,
+        item.subscription_id,
+        &item.tx_hash,
+        CLAIM_STALE_AFTER_SECS,
+    )
+    .await?;
+    if !claimed {
+        tracing::debug!(
+            subscription_id = item.subscription_id,
+            tx_hash = %item.tx_hash,
+            "claim not acquired (held by another worker or already delivered) — skipping"
+        );
+        return Ok(DispatchOutcome::ClaimSkipped);
+    }
+    if let Err(reason) = webhook_url_is_safe(&item.webhook_url) {
+        tracing::warn!(
+            subscription_id = item.subscription_id,
+            tx_hash = %item.tx_hash,
+            ?reason,
+            "webhook URL unsafe — skipping (recorded as failed)"
+        );
+        db::queries::record_alert_delivery(
+            &pool,
+            item.subscription_id,
+            &item.tx_hash,
+            false,
+            Some(&format!("unsafe url: {reason:?}")),
+        )
+        .await?;
+        return Ok(DispatchOutcome::UnsafeUrl);
+    }
+    // HMAC 키 = 저장된 hex 문자열을 32바이트로 디코드(리뷰 H2). API가 항상
+    // 64-hex를 박지만 외부 변조에 대비.
+    let key = match hex::decode(&item.signing_secret) {
+        Ok(k) => k,
+        Err(_) => {
+            tracing::warn!(
+                subscription_id = item.subscription_id,
+                tx_hash = %item.tx_hash,
+                "stored signing_secret is not valid hex — recording as failed"
+            );
+            db::queries::record_alert_delivery(
+                &pool,
+                item.subscription_id,
+                &item.tx_hash,
+                false,
+                Some("corrupt signing_secret (not hex)"),
+            )
+            .await?;
+            return Ok(DispatchOutcome::Failed);
+        }
+    };
+    let body = build_payload(&item);
+    let signature = sign_payload(&key, body.as_bytes());
+    match post_signed(&client, &item.webhook_url, &signature, body).await {
+        Ok(()) => {
+            db::queries::record_alert_delivery(
+                &pool,
+                item.subscription_id,
+                &item.tx_hash,
+                true,
+                None,
+            )
+            .await?;
+            tracing::info!(
+                subscription_id = item.subscription_id,
+                tx_hash = %item.tx_hash,
+                "alert delivered"
+            );
+            Ok(DispatchOutcome::Delivered)
+        }
+        Err(e) => {
+            // 리뷰 L1: 외부 에러 메시지(reqwest)는 URL/IP/내부 진단을 포함할 수
+            // 있어 영구 저장되므로 길이 캡.
+            let err_msg: String = e.to_string().chars().take(500).collect();
+            tracing::warn!(
+                subscription_id = item.subscription_id,
+                tx_hash = %item.tx_hash,
+                error = %err_msg,
+                "alert delivery failed (will retry)"
+            );
+            db::queries::record_alert_delivery(
+                &pool,
+                item.subscription_id,
+                &item.tx_hash,
+                false,
+                Some(&err_msg),
+            )
+            .await?;
+            Ok(DispatchOutcome::Failed)
+        }
+    }
+}
+
+/// 디스패처 1사이클: 배치를 가져와 각 매칭을 `MAX_CONCURRENT_POSTS` 만큼
+/// **bounded 동시**(HARDEN-T03/M2) 처리한다.
 ///
 /// `client`는 `Policy::none()` + 타임아웃 + UA가 설정된 상태로 주입한다(SSRF의
-/// 리다이렉트 우회 방지). 한 사이클만 수행 — 루프는 [`dispatch_loop`].
+/// 리다이렉트 우회 방지). 한 사이클만 수행 — 루프는 [`dispatch_loop`]. 한 task
+/// 가 panic/내부 에러로 실패해도 다른 task는 계속 처리(알림은 best-effort);
+/// 실패는 `metrics.failed`로 가시화.
 pub async fn dispatch_once(
     pool: &PgPool,
     client: &reqwest::Client,
@@ -113,109 +232,47 @@ pub async fn dispatch_once(
 ) -> Result<()> {
     let pending =
         db::queries::find_pending_alert_matches(pool, batch, CLAIM_STALE_AFTER_SECS).await?;
-    for item in pending {
+    let mut iter = pending.into_iter();
+    let mut tasks: tokio::task::JoinSet<Result<DispatchOutcome>> = tokio::task::JoinSet::new();
+
+    // Prime: spawn up to MAX_CONCURRENT_POSTS tasks
+    while tasks.len() < MAX_CONCURRENT_POSTS {
+        let Some(item) = iter.next() else { break };
         metrics.attempted += 1;
-        // 원자적 claim 토큰 발급(HARDEN-T02). 실패 = 다른 워커 진행 중 또는
-        // 이미 delivered — 양쪽 모두 정상 흐름이라 다음 매칭으로 건너뜀.
-        let claimed = db::queries::try_claim_alert_match(
-            pool,
-            item.subscription_id,
-            &item.tx_hash,
-            CLAIM_STALE_AFTER_SECS,
-        )
-        .await?;
-        if !claimed {
-            metrics.claim_skipped += 1;
-            tracing::debug!(
-                subscription_id = item.subscription_id,
-                tx_hash = %item.tx_hash,
-                "claim not acquired (held by another worker or already delivered) — skipping"
-            );
-            continue;
-        }
-        if let Err(reason) = webhook_url_is_safe(&item.webhook_url) {
-            tracing::warn!(
-                subscription_id = item.subscription_id,
-                tx_hash = %item.tx_hash,
-                ?reason,
-                "webhook URL unsafe — skipping (recorded as failed)"
-            );
-            metrics.unsafe_url_skipped += 1;
-            db::queries::record_alert_delivery(
-                pool,
-                item.subscription_id,
-                &item.tx_hash,
-                false,
-                Some(&format!("unsafe url: {reason:?}")),
-            )
-            .await?;
-            continue;
-        }
-        // HMAC 키는 저장된 hex 문자열을 **32바이트로 디코드**한 것(리뷰 H2 —
-        // 수신자가 hex를 키로 그대로 쓰지 않고 디코드하는 일반적 기대 일치).
-        // API는 항상 64-hex를 박지만 외부 변조에 대비해 실패 시 안전 기록.
-        let key = match hex::decode(&item.signing_secret) {
-            Ok(k) => k,
-            Err(_) => {
+        let pool = pool.clone();
+        let client = client.clone();
+        tasks.spawn(async move { dispatch_item(pool, client, item).await });
+    }
+
+    // Drain + refill: 완료마다 다음 1개를 spawn해 항상 ≤MAX 유지
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(outcome)) => match outcome {
+                DispatchOutcome::Delivered => metrics.delivered += 1,
+                DispatchOutcome::Failed => metrics.failed += 1,
+                DispatchOutcome::UnsafeUrl => metrics.unsafe_url_skipped += 1,
+                DispatchOutcome::ClaimSkipped => metrics.claim_skipped += 1,
+            },
+            Ok(Err(e)) => {
+                // 내부 에러(DB 등) — task 자체는 살아남았으나 결과가 에러.
+                // 알림은 best-effort라 사이클 전체를 죽이지 않고 격리.
+                tracing::error!(error = %e, "alert dispatch task returned error");
                 metrics.failed += 1;
-                tracing::warn!(
-                    subscription_id = item.subscription_id,
-                    tx_hash = %item.tx_hash,
-                    "stored signing_secret is not valid hex — recording as failed"
-                );
-                db::queries::record_alert_delivery(
-                    pool,
-                    item.subscription_id,
-                    &item.tx_hash,
-                    false,
-                    Some("corrupt signing_secret (not hex)"),
-                )
-                .await?;
-                continue;
-            }
-        };
-        let body = build_payload(&item);
-        let signature = sign_payload(&key, body.as_bytes());
-        match post_signed(client, &item.webhook_url, &signature, body).await {
-            Ok(()) => {
-                metrics.delivered += 1;
-                db::queries::record_alert_delivery(
-                    pool,
-                    item.subscription_id,
-                    &item.tx_hash,
-                    true,
-                    None,
-                )
-                .await?;
-                tracing::info!(
-                    subscription_id = item.subscription_id,
-                    tx_hash = %item.tx_hash,
-                    "alert delivered"
-                );
             }
             Err(e) => {
+                // task panic 또는 cancellation
+                tracing::error!(error = %e, "alert dispatch task panicked or was cancelled");
                 metrics.failed += 1;
-                // 리뷰 L1: 외부 에러 메시지(reqwest)는 URL/IP/내부 진단을 포함할
-                // 수 있어 `alert_delivery.last_error`에 영구 저장된다 — 길이 캡으로
-                // 무한 누적·과다 누설 방지(URL 마스킹은 별도 백로그).
-                let err_msg: String = e.to_string().chars().take(500).collect();
-                tracing::warn!(
-                    subscription_id = item.subscription_id,
-                    tx_hash = %item.tx_hash,
-                    error = %err_msg,
-                    "alert delivery failed (will retry)"
-                );
-                db::queries::record_alert_delivery(
-                    pool,
-                    item.subscription_id,
-                    &item.tx_hash,
-                    false,
-                    Some(&err_msg),
-                )
-                .await?;
             }
         }
+        if let Some(item) = iter.next() {
+            metrics.attempted += 1;
+            let pool = pool.clone();
+            let client = client.clone();
+            tasks.spawn(async move { dispatch_item(pool, client, item).await });
+        }
     }
+
     Ok(())
 }
 
@@ -328,5 +385,121 @@ mod tests {
         assert_eq!(p, r#"{"subscription_id":42,"tx_hash":"0xabc"}"#);
         // 같은 입력 → 같은 본문 (서명 결정성)
         assert_eq!(p, build_payload(&m));
+    }
+
+    // ── HARDEN-T03 / L3: mock receiver e2e (wire 서명 계약) ──────
+    //
+    // SSRF 가드가 loopback을 막아 production `dispatch_once` 전체를 localhost로
+    // 돌릴 수 없다(가드 우회는 보안 회귀라 거부). 대신 *wire 서명 계약*만 격리해
+    // 검증: 디스패처가 보내는 `sign_payload + post_signed`의 결과가 수신자
+    // 입장에서 (a) HMAC 재계산과 일치하고 (b) 본문이 그대로 도착하며 (c) 헤더
+    // 형식이 계약대로인지 확인. SSRF rejection 통합은 14 단위 + `verify-alerts.sh`가
+    // 별도 가드. 클레임/기록은 claim 통합테스트가 별도 가드.
+
+    #[tokio::test]
+    async fn wire_signed_post_roundtrips_to_receiver() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local TCP");
+        let port = listener.local_addr().expect("addr").port();
+
+        // 수신자 비밀 — 32바이트 키, hex 인코딩된 형태는 DB에 저장될 형태
+        let secret_bytes: [u8; 32] = [0xaa; 32];
+        let secret_hex = hex::encode(secret_bytes);
+        let secret_for_verify = secret_bytes.to_vec();
+
+        // 수신자 태스크: 1 connection 수락 → 요청 파싱 → HMAC 검증 → 200 응답
+        let receiver = tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.expect("accept");
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = tokio::io::BufReader::new(read_half);
+
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .await
+                .expect("read request line");
+
+            let mut content_length = 0usize;
+            let mut signature_header: Option<String> = None;
+            let mut content_type: Option<String> = None;
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).await.expect("read header");
+                if n == 0 || line == "\r\n" {
+                    break;
+                }
+                let trimmed = line.trim_end_matches("\r\n");
+                let lower = trimmed.to_ascii_lowercase();
+                if let Some(v) = lower.strip_prefix("content-length:") {
+                    content_length = v.trim().parse().expect("content-length parse");
+                } else if let Some(v) = lower.strip_prefix("x-amarillo-signature:") {
+                    signature_header = Some(v.trim().to_string());
+                } else if let Some(v) = lower.strip_prefix("content-type:") {
+                    content_type = Some(v.trim().to_string());
+                }
+            }
+
+            let mut body = vec![0u8; content_length];
+            reader.read_exact(&mut body).await.expect("read body");
+
+            let header_val = signature_header.expect("signature header present");
+            let signature_hex = header_val
+                .strip_prefix("sha256=")
+                .expect("sha256= prefix")
+                .to_string();
+            let expected = sign_payload(&secret_for_verify, &body);
+            let sig_ok = signature_hex == expected;
+
+            let _ = write_half
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+            let _ = write_half.flush().await;
+
+            (sig_ok, body, content_type, request_line)
+        });
+
+        let item = AlertMatch {
+            subscription_id: 42,
+            tx_hash: "0xabc".to_string(),
+            webhook_url: format!("http://127.0.0.1:{port}/hook"),
+            signing_secret: secret_hex,
+        };
+
+        // production 디스패처와 동일한 client 설정(redirect off + timeout)
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(5))
+            .build()
+            .expect("client");
+
+        // wire 경로: production이 따르는 정확한 시퀀스
+        let body = build_payload(&item);
+        let key = hex::decode(&item.signing_secret).expect("hex decode");
+        let signature = sign_payload(&key, body.as_bytes());
+        post_signed(&client, &item.webhook_url, &signature, body.clone())
+            .await
+            .expect("post_signed");
+
+        let (sig_ok, body_received, content_type, request_line) =
+            receiver.await.expect("receiver join");
+        assert!(sig_ok, "수신자의 HMAC 재계산이 디스패처 서명과 일치해야");
+        assert_eq!(
+            String::from_utf8(body_received).expect("utf8 body"),
+            body,
+            "본문이 wire로 그대로 round-trip"
+        );
+        assert_eq!(
+            content_type.as_deref(),
+            Some("application/json"),
+            "Content-Type 계약"
+        );
+        assert!(
+            request_line.starts_with("POST "),
+            "method = POST: got {request_line:?}"
+        );
     }
 }
