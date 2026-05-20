@@ -50,6 +50,10 @@ fn v1_router() -> Router<PgPool> {
             "/analytics/failed-tx/timeseries",
             get(failed_tx::failed_tx_timeseries),
         )
+        .route(
+            "/analytics/failed-tx/by-label",
+            get(failed_tx::failed_tx_by_label),
+        )
         // failed-tx
         .route("/failed-tx", get(failed_tx::list_failed_tx))
         .route("/failed-tx/{tx_hash}", get(failed_tx::get_failed_tx))
