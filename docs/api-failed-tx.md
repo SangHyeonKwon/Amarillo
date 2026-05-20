@@ -47,7 +47,20 @@ flattened call trace.
       }
       // … deeper frames
     ],
-    "call_tree_truncated": false           // true if capped at MAX 2000 frames
+    "call_tree_truncated": false,          // true if capped at MAX 2000 frames
+    "root_cause": {                        // first call_tree frame with error ≠ null, or null (S10 / M004)
+      "tx_hash": "0xdead…0001",
+      "call_depth": 0,
+      "call_type": "CALL",
+      "from_addr": "0x5555…5555",
+      "to_addr": "0xE592…1564",
+      "value": "0",
+      "gas_used": 35000,
+      "input": "0x414bf389",
+      "output": null,
+      "error": "Too little received",
+      "trace_id": 4
+    }
   }
 }
 ```
@@ -62,6 +75,19 @@ reconstruction is a future slice (see `.gsd/DECISIONS.md` D004); use
 
 `call_tree` is capped at **2000** frames; `call_tree_truncated: true` signals a
 partial response (defense against pathologically large traces).
+
+`root_cause` is a *single* `trace_log` frame — the earliest entry in `call_tree`
+whose `error` is non-null, i.e. **where the revert actually originated**
+(pre-order DFS order). It is a redundant projection of `call_tree` provided
+for the common "where did the failure come from?" question, so clients don't
+have to scan the array. **`null` is explicit, not absence** — it signals
+that the indexer recorded no per-frame error for this transaction (silent
+default is intentionally not allowed; see `.gsd/DECISIONS.md` D014).
+
+Per-frame trace analysis is what Dune can't expose out of the box — Dune's
+query model has no notion of `trace_log.error` because traces aren't part
+of its public dataset. `root_cause` makes that asymmetry directly visible
+to embedding products (S10 of M004).
 
 ### Response `400` / `404`
 
