@@ -12,7 +12,10 @@ import {
   normalizeAddressParam,
   parseBlockEnvelope,
   parseDailyVolumeEnvelope,
+  parseFailedTxDetailEnvelope,
   parseFailedTxEnvelope,
+  parseFailedTxListEnvelope,
+  parseFailedTxTimeseriesEnvelope,
   parseLatestBlockEnvelope,
   parsePoolEnvelope,
   parsePoolsEnvelope,
@@ -22,6 +25,7 @@ import {
   parseTradersEnvelope,
 } from "./contract";
 import { apiGet } from "./client";
+import type { ErrorCategory, IsoDateTime, TimeBucket } from "./types";
 
 const STALE_TIME = 30_000;
 
@@ -190,6 +194,92 @@ export function useFailedTxAnalysis() {
     queryKey: ["analytics", "failed-tx"],
     queryFn: ({ signal }) =>
       apiGet("/v1/analytics/failed-tx", undefined, signal, parseFailedTxEnvelope),
+    select: (r) => r.data,
+    staleTime: STALE_TIME,
+  });
+}
+
+// ── Failure-intelligence (M001) — per-tx detail / filtered list / timeseries ─
+
+/**
+ * Single failed-tx diagnosis: decoded revert reason + classified category +
+ * flattened call-tree (pre-order DFS by `trace_id`). `tx_hash` is lowercased
+ * before the request; the query stays disabled until it's provided.
+ */
+export function useFailedTxDetail(txHash: string | undefined) {
+  const normalized = txHash?.trim().toLowerCase();
+  return useQuery({
+    queryKey: ["failed-tx", "detail", normalized],
+    enabled: !!normalized,
+    queryFn: ({ signal }) =>
+      apiGet(
+        `/v1/failed-tx/${normalized}`,
+        undefined,
+        signal,
+        parseFailedTxDetailEnvelope,
+      ),
+    select: (r) => r.data,
+    staleTime: STALE_TIME,
+  });
+}
+
+export interface FailedTxListArgs {
+  /** Filter by error category (SCREAMING_SNAKE_CASE on the wire). */
+  category?: ErrorCategory;
+  /** Inclusive lower bound, RFC3339 (e.g. `2024-09-01T00:00:00Z`). */
+  from?: IsoDateTime;
+  /** Inclusive upper bound, RFC3339. */
+  to?: IsoDateTime;
+  limit?: number;
+  offset?: number;
+}
+
+/**
+ * Failed-tx list with **filter-adjusted `total`** (D005). Returns the full
+ * `TotalPaginatedResponse` so the page can render "N of TOTAL".
+ */
+export function useFailedTxList({
+  category,
+  from,
+  to,
+  limit = 20,
+  offset = 0,
+}: FailedTxListArgs = {}) {
+  return useQuery({
+    queryKey: ["failed-tx", "list", { category, from, to, limit, offset }],
+    queryFn: ({ signal }) =>
+      apiGet(
+        "/v1/failed-tx",
+        { category, from, to, limit, offset },
+        signal,
+        parseFailedTxListEnvelope,
+      ),
+    staleTime: STALE_TIME,
+  });
+}
+
+export interface FailedTxTimeseriesArgs {
+  /** Bucket size: `hour` / `day` (default) / `week`. */
+  interval?: TimeBucket;
+  from?: IsoDateTime;
+  to?: IsoDateTime;
+}
+
+/** Failed-tx counts bucketed by interval and category (S03 timeseries). */
+export function useFailedTxTimeseries({
+  interval = "day",
+  from,
+  to,
+}: FailedTxTimeseriesArgs = {}) {
+  return useQuery({
+    queryKey: ["analytics", "failed-tx", "timeseries", { interval, from, to }],
+    queryFn: ({ signal }) =>
+      apiGet(
+        "/v1/analytics/failed-tx/timeseries",
+        { interval, from, to },
+        signal,
+        parseFailedTxTimeseriesEnvelope,
+      ),
     select: (r) => r.data,
     staleTime: STALE_TIME,
   });

@@ -1,6 +1,8 @@
 import { useMemo } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
@@ -13,15 +15,24 @@ import {
   YAxis,
 } from "recharts";
 
-import { useFailedTxAnalysis } from "@/api/hooks";
-import { ERROR_CATEGORIES, type FailedTxAnalysis } from "@/api/types";
+import {
+  useFailedTxAnalysis,
+  useFailedTxDetail,
+  useFailedTxList,
+  useFailedTxTimeseries,
+} from "@/api/hooks";
+import {
+  ERROR_CATEGORIES,
+  type ErrorCategory,
+  type FailedTransaction,
+  type FailedTxAnalysis,
+} from "@/api/types";
 import { AsyncState } from "@/components/AsyncState";
 import { type Column, DataTable } from "@/components/DataTable";
 import { KpiCard } from "@/components/KpiCard";
 import {
   axisLine,
   axisTick,
-  chartWarning,
   numeric,
   tooltipContentStyle,
   tooltipItemStyle,
@@ -43,6 +54,9 @@ import { parseEnumFilter, parseIntFilter, useUrlFilters } from "@/lib/urlFilters
 const CATEGORY_FILTERS = ["ALL", ...ERROR_CATEGORIES] as const;
 const SORT_FILTERS = ["failures", "share", "recent"] as const;
 const WINDOW_FILTERS = ["7", "30", "90", "365", "all"] as const;
+
+/** Per-cycle page size for the failed-tx list (S04 hardening: receiver-capped). */
+const LIST_LIMIT = 20;
 
 const columns: Column<FailedTxAnalysis>[] = [
   {
@@ -91,6 +105,8 @@ export function FailedTx() {
     category: "ALL",
     sort: "failures",
     window: "90",
+    offset: "0",
+    tx: "",
   });
   const selectedCategory = parseEnumFilter(
     filters.category,
@@ -100,13 +116,126 @@ export function FailedTx() {
   const sortBy = parseEnumFilter(filters.sort, SORT_FILTERS, "failures");
   const windowFilter = parseEnumFilter(filters.window, WINDOW_FILTERS, "90");
   const windowDays = windowFilter === "all" ? null : parseIntFilter(windowFilter, 90, 1, 3650);
+  const offset = parseIntFilter(filters.offset, 0, 0, 1_000_000);
+  const selectedTx = filters.tx.trim().toLowerCase();
 
   const query = useFailedTxAnalysis();
   const data = query.data ?? [];
+
+  // ── Real timeseries + filtered list + drill-down (FE-WIRE-T02) ──
+  // Convert the lookback window to an RFC3339 range the new endpoints accept.
+  // Empty `from`/`to` means "no bound" on the server.
+  const { fromIso, toIso } = useMemo(() => {
+    if (windowDays == null) return { fromIso: undefined, toIso: undefined };
+    const now = Date.now();
+    return {
+      fromIso: new Date(now - windowDays * 24 * 60 * 60 * 1000).toISOString(),
+      toIso: new Date(now).toISOString(),
+    };
+  }, [windowDays]);
+  // Buckets follow the lookback: hour for ≤7d, day for ≤90d, week beyond.
+  const interval = windowDays == null || windowDays > 90
+    ? "week"
+    : windowDays <= 7
+      ? "hour"
+      : "day";
+
+  const categoryParam = selectedCategory === "ALL" ? undefined : selectedCategory;
+  const listQuery = useFailedTxList({
+    category: categoryParam,
+    from: fromIso,
+    to: toIso,
+    limit: LIST_LIMIT,
+    offset,
+  });
+  const listData = listQuery.data?.data ?? [];
+  const listTotal = listQuery.data?.pagination.total ?? 0;
+  const listCount = listQuery.data?.pagination.count ?? 0;
+
+  const trendQuery = useFailedTxTimeseries({ interval, from: fromIso, to: toIso });
+  const trendPoints = trendQuery.data ?? [];
+
+  const detailQuery = useFailedTxDetail(selectedTx || undefined);
+  const detail = detailQuery.data;
+
+  // Pivot timeseries → wide rows for stacked area chart (one column per category).
+  const trendChart = useMemo(() => {
+    if (trendPoints.length === 0) return { rows: [], categories: [] as ErrorCategory[] };
+    const buckets = new Set<string>();
+    const cats = new Set<ErrorCategory>();
+    for (const p of trendPoints) {
+      buckets.add(p.bucket);
+      cats.add(p.error_category);
+    }
+    const orderedBuckets = [...buckets].sort();
+    const orderedCats = [...cats];
+    const rows = orderedBuckets.map((bucket) => {
+      const row: Record<string, string | number> = { bucket };
+      for (const c of orderedCats) {
+        row[c] = 0;
+      }
+      return row;
+    });
+    const rowByBucket = new Map<string, Record<string, string | number>>();
+    rows.forEach((r) => rowByBucket.set(String(r.bucket), r));
+    for (const p of trendPoints) {
+      const r = rowByBucket.get(p.bucket);
+      if (r) r[p.error_category] = p.failure_count;
+    }
+    return { rows, categories: orderedCats };
+  }, [trendPoints]);
+
   const source = searchParams.get("source");
   const sourcePool = searchParams.get("pool");
 
-  const { scoped, chart, timeline, total, topCategory, mostRecentLabel } = useMemo(() => {
+  const listColumns: Column<FailedTransaction>[] = [
+    {
+      header: "Tx hash",
+      cell: (f) => (
+        <span className="mono" title={f.tx_hash}>
+          {f.tx_hash.slice(0, 10)}…{f.tx_hash.slice(-6)}
+        </span>
+      ),
+    },
+    {
+      header: "Category",
+      cell: (f) => (
+        <span
+          className="badge"
+          style={{
+            color: errorCategoryColor(f.error_category),
+            borderColor: errorCategoryColor(f.error_category),
+          }}
+        >
+          {errorCategoryLabel(f.error_category)}
+        </span>
+      ),
+    },
+    {
+      header: "Revert reason",
+      cell: (f) => (
+        <span className="muted" title={f.revert_reason ?? "—"}>
+          {f.revert_reason ?? "—"}
+        </span>
+      ),
+    },
+    {
+      header: "Gas",
+      align: "right",
+      cell: (f) => formatCompact(f.gas_used),
+    },
+    {
+      header: "When",
+      align: "right",
+      cell: (f) => (
+        <span className="muted" title={f.timestamp}>
+          {timeAgo(f.timestamp)}
+        </span>
+      ),
+    },
+  ];
+
+  const { scoped, chart, total, topCategory, mostRecentLabel } = useMemo(() => {
     const cutoffMs =
       windowDays == null ? null : Date.now() - windowDays * 24 * 60 * 60 * 1000;
 
@@ -136,29 +265,6 @@ export function FailedTx() {
         break;
     }
 
-    const timelineByDate = new Map<
-      string,
-      { date: string; categoriesTouched: number; failures: number }
-    >();
-    for (const row of sorted) {
-      const date = row.most_recent_failure.slice(0, 10);
-      const curr = timelineByDate.get(date);
-      if (curr) {
-        curr.categoriesTouched += 1;
-        curr.failures += row.failure_count;
-      } else {
-        timelineByDate.set(date, {
-          date,
-          categoriesTouched: 1,
-          failures: row.failure_count,
-        });
-      }
-    }
-
-    const timelineRows = [...timelineByDate.values()].sort((a, b) =>
-      a.date.localeCompare(b.date),
-    );
-
     const mostRecent = sorted[0]?.most_recent_failure;
     return {
       chart: sorted.map((f) => ({
@@ -170,7 +276,6 @@ export function FailedTx() {
       })),
       total: sorted.reduce((acc, f) => acc + f.failure_count, 0),
       scoped: sorted,
-      timeline: timelineRows,
       topCategory: sorted[0]
         ? errorCategoryLabel(sorted[0].error_category)
         : "—",
@@ -202,7 +307,7 @@ export function FailedTx() {
             <select
               id="category"
               value={selectedCategory}
-              onChange={(e) => setFilters({ category: e.target.value })}
+              onChange={(e) => setFilters({ category: e.target.value, offset: "0" })}
             >
               <option value="ALL">All categories</option>
               {ERROR_CATEGORIES.map((category) => (
@@ -229,7 +334,7 @@ export function FailedTx() {
             <select
               id="window"
               value={windowFilter}
-              onChange={(e) => setFilters({ window: e.target.value })}
+              onChange={(e) => setFilters({ window: e.target.value, offset: "0" })}
             >
               <option value="7">Last 7 days</option>
               <option value="30">Last 30 days</option>
@@ -367,67 +472,77 @@ export function FailedTx() {
 
         <div className="card">
           <div className="card-head">
-            <div className="card-title">Time-axis of recent failures</div>
-            <div className="card-sub">Grouped by most-recent failure day per category</div>
+            <div className="card-title">Failure trend</div>
+            <div className="card-sub">
+              Real timeseries (`/v1/analytics/failed-tx/timeseries`) — bucketed by{" "}
+              <span className="mono">{interval}</span>, stacked by category
+            </div>
           </div>
-          <div className="chart-box">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart
-                data={timeline}
-                margin={{ top: 8, right: 12, bottom: 0, left: 0 }}
-              >
-                <CartesianGrid stroke="rgba(51,51,51,0.8)" vertical={false} />
-                <XAxis
-                  dataKey="date"
-                  tick={axisTick}
-                  axisLine={axisLine}
-                  tickLine={false}
-                  tickFormatter={formatDate}
-                  minTickGap={26}
-                />
-                <YAxis
-                  yAxisId="failures"
-                  tick={axisTick}
-                  axisLine={false}
-                  tickLine={false}
-                  width={48}
-                  tickFormatter={(v) => formatCompact(numeric(v))}
-                />
-                <YAxis
-                  yAxisId="categories"
-                  orientation="right"
-                  tick={axisTick}
-                  axisLine={false}
-                  tickLine={false}
-                  width={38}
-                />
-                <Tooltip
-                  contentStyle={tooltipContentStyle}
-                  itemStyle={tooltipItemStyle}
-                  labelStyle={tooltipLabelStyle}
-                  labelFormatter={(l) => formatDate(String(l))}
-                  formatter={(v, key) => [
-                    key === "categoriesTouched"
-                      ? formatNumber(numeric(v))
-                      : formatCompact(numeric(v)),
-                    key === "categoriesTouched" ? "Categories touched" : "Failures",
-                  ]}
-                />
-                <Bar
-                  yAxisId="failures"
-                  dataKey="failures"
-                  fill="#F66061"
-                  radius={[3, 3, 0, 0]}
-                />
-                <Bar
-                  yAxisId="categories"
-                  dataKey="categoriesTouched"
-                  fill={chartWarning}
-                  radius={[3, 3, 0, 0]}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          <AsyncState
+            isLoading={trendQuery.isLoading}
+            isError={trendQuery.isError}
+            error={trendQuery.error}
+            isEmpty={trendChart.rows.length === 0}
+            emptyLabel="No failures in the selected window."
+          >
+            <div className="chart-box">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart
+                  data={trendChart.rows}
+                  margin={{ top: 8, right: 12, bottom: 0, left: 0 }}
+                >
+                  <CartesianGrid stroke="rgba(51,51,51,0.8)" vertical={false} />
+                  <XAxis
+                    dataKey="bucket"
+                    tick={axisTick}
+                    axisLine={axisLine}
+                    tickLine={false}
+                    tickFormatter={(v) => formatDate(String(v))}
+                    minTickGap={26}
+                  />
+                  <YAxis
+                    tick={axisTick}
+                    axisLine={false}
+                    tickLine={false}
+                    width={48}
+                    tickFormatter={(v) => formatCompact(numeric(v))}
+                  />
+                  <Tooltip
+                    contentStyle={tooltipContentStyle}
+                    itemStyle={tooltipItemStyle}
+                    labelStyle={tooltipLabelStyle}
+                    labelFormatter={(l) => formatDateTime(String(l))}
+                    formatter={(v, key) => [
+                      formatNumber(numeric(v)),
+                      errorCategoryLabel(String(key) as ErrorCategory),
+                    ]}
+                  />
+                  {trendChart.categories.map((cat) => (
+                    <Area
+                      key={cat}
+                      type="monotone"
+                      dataKey={cat}
+                      stackId="categories"
+                      stroke={errorCategoryColor(cat)}
+                      fill={errorCategoryColor(cat)}
+                      fillOpacity={0.55}
+                    />
+                  ))}
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="legend">
+              {trendChart.categories.map((cat) => (
+                <span key={cat} className="legend-item">
+                  <span
+                    className="legend-swatch"
+                    style={{ background: errorCategoryColor(cat) }}
+                  />
+                  {errorCategoryLabel(cat)}
+                </span>
+              ))}
+            </div>
+          </AsyncState>
         </div>
 
         <div className="card">
@@ -442,57 +557,192 @@ export function FailedTx() {
             rows={scoped}
             rowKey={(f) => f.error_category}
             caption="Failed transaction category breakdown"
-            onRowClick={(row) => setFilters({ category: row.error_category })}
+            onRowClick={(row) => setFilters({ category: row.error_category, offset: "0" })}
           />
         </div>
 
-        <div
-          className="grid"
-          style={{
-            gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))",
-          }}
-        >
+        <div className="card">
+          <div className="card-head">
+            <div className="card-title">Browse failed transactions</div>
+            <div className="card-sub">
+              `/v1/failed-tx` — filter inherits the toolbar (category + lookback).
+              Row click loads the decoded revert + call_tree below.
+            </div>
+          </div>
+          <AsyncState
+            isLoading={listQuery.isLoading}
+            isError={listQuery.isError}
+            error={listQuery.error}
+            isEmpty={listData.length === 0}
+            emptyLabel="No failed transactions in this filter."
+          >
+            <DataTable
+              columns={listColumns}
+              rows={listData}
+              rowKey={(f) => f.tx_hash}
+              caption="Failed transactions (paginated, with accurate total)"
+              onRowClick={(row) => setFilters({ tx: row.tx_hash })}
+            />
+            <div
+              className="spread"
+              style={{ marginTop: 12, alignItems: "center" }}
+            >
+              <span className="muted">
+                Showing {listCount === 0 ? 0 : offset + 1}–{offset + listCount} of{" "}
+                {formatNumber(listTotal)}
+              </span>
+              <span className="toolbar">
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={offset === 0}
+                  onClick={() =>
+                    setFilters({ offset: String(Math.max(offset - LIST_LIMIT, 0)) })
+                  }
+                >
+                  Prev
+                </button>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={offset + listCount >= listTotal}
+                  onClick={() => setFilters({ offset: String(offset + LIST_LIMIT) })}
+                >
+                  Next
+                </button>
+              </span>
+            </div>
+          </AsyncState>
+        </div>
+
+        {selectedTx && (
           <div className="card">
             <div className="card-head">
-              <div className="card-title">Investigation drill-down</div>
-              <div className="card-sub">Cross-check failed-tx signal with other lenses</div>
-            </div>
-            <div className="grid">
-              <Link className="btn" to="/traders?source=failed-tx">
-                Open top traders
-              </Link>
-              <Link className="btn" to="/pools?source=failed-tx">
-                Open pools
-              </Link>
+              <div className="card-title">Tx inspection</div>
+              <div className="card-sub">
+                <span className="mono">{selectedTx}</span> · `/v1/failed-tx/{`{tx_hash}`}`
+              </div>
               <button
                 className="btn"
                 type="button"
-                onClick={() => setFilters({ category: "ALL", sort: "recent" })}
+                onClick={() => setFilters({ tx: "" })}
               >
-                Focus recent anomalies
+                Close
               </button>
             </div>
+            <AsyncState
+              isLoading={detailQuery.isLoading}
+              isError={detailQuery.isError}
+              error={detailQuery.error}
+              isEmpty={!detail}
+              emptyLabel="No matching failed transaction (404)."
+            >
+              {detail && (
+                <>
+                  <div className="grid kpi-grid">
+                    <KpiCard
+                      label="Category"
+                      icon="▤"
+                      value={
+                        <span
+                          className="badge"
+                          style={{
+                            color: errorCategoryColor(detail.failed.error_category),
+                            borderColor: errorCategoryColor(
+                              detail.failed.error_category,
+                            ),
+                          }}
+                        >
+                          {errorCategoryLabel(detail.failed.error_category)}
+                        </span>
+                      }
+                    />
+                    <KpiCard
+                      label="Revert reason"
+                      icon="⚠"
+                      value={detail.failed.revert_reason ?? "—"}
+                    />
+                    <KpiCard
+                      label="Failing function"
+                      icon="ƒ"
+                      value={
+                        <span className="mono">
+                          {detail.failed.failing_function ?? "—"}
+                        </span>
+                      }
+                    />
+                    <KpiCard
+                      label="Gas used"
+                      icon="⛽"
+                      value={formatCompact(detail.failed.gas_used)}
+                    />
+                  </div>
+                  {detail.call_tree_truncated && (
+                    <div
+                      className="badge"
+                      style={{ marginTop: 8, color: "#F66061", borderColor: "#F66061" }}
+                    >
+                      call_tree truncated (S04 cap hit) — tail dropped
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      marginTop: 12,
+                      fontFamily: "var(--font-mono, monospace)",
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                    }}
+                  >
+                    {detail.call_tree.map((frame) => (
+                      <div
+                        key={frame.trace_id}
+                        style={{ paddingLeft: frame.call_depth * 16 }}
+                      >
+                        <span className="muted">[{frame.trace_id}]</span>{" "}
+                        {frame.call_type}{" "}
+                        <span className="mono">{frame.from_addr.slice(0, 10)}…</span>
+                        {" → "}
+                        <span className="mono">
+                          {frame.to_addr ? `${frame.to_addr.slice(0, 10)}…` : "—"}
+                        </span>{" "}
+                        <span className="muted">
+                          ({formatCompact(frame.gas_used)} gas)
+                        </span>
+                        {frame.error && (
+                          <span
+                            style={{ color: "#F66061", marginLeft: 8 }}
+                          >
+                            err: {frame.error}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </AsyncState>
           </div>
-          <div className="card">
-            <div className="card-head">
-              <div className="card-title">Sample signals</div>
-              <div className="card-sub">
-                Latest category snapshots for triage (raw failed-tx events need API extension)
-              </div>
-            </div>
-            <div className="sample-signals">
-              {scoped.slice(0, 5).map((row) => (
-                <div key={row.error_category} className="spread">
-                  <span>{errorCategoryLabel(row.error_category)}</span>
-                  <span className="muted">{formatDateTime(row.most_recent_failure)}</span>
-                </div>
-              ))}
-              {scoped.length === 0 && <span className="muted">No category snapshots.</span>}
-            </div>
-            <p className="muted" style={{ marginTop: 12 }}>
-              Proposed API additions: failed-tx raw list with filters (`category`, `from`, `to`,
-              `limit`, `offset`) and tx-level detail endpoint.
-            </p>
+        )}
+
+        <div className="card">
+          <div className="card-head">
+            <div className="card-title">Investigation drill-down</div>
+            <div className="card-sub">Cross-check failed-tx signal with other lenses</div>
+          </div>
+          <div className="grid">
+            <Link className="btn" to="/traders?source=failed-tx">
+              Open top traders
+            </Link>
+            <Link className="btn" to="/pools?source=failed-tx">
+              Open pools
+            </Link>
+            <button
+              className="btn"
+              type="button"
+              onClick={() => setFilters({ category: "ALL", sort: "recent", offset: "0" })}
+            >
+              Focus recent anomalies
+            </button>
           </div>
         </div>
       </AsyncState>
