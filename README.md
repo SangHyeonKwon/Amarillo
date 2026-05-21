@@ -109,9 +109,25 @@ docker compose up -d && docker compose run --rm seed
 
 | Endpoint | Purpose |
 |----------|---------|
-| `GET /v1/failed-tx/{tx_hash}` | Single tx diagnosis (400 if malformed, 404 if absent) |
+| `GET /v1/failed-tx/{tx_hash}` | Single tx diagnosis — `root_cause` + `failing_function_decoded` + `diagnosis` (S10–S12 cumulative) |
 | `GET /v1/failed-tx` | Filtered, paginated list + accurate `total` |
 | `GET /v1/analytics/failed-tx/timeseries` | Failure counts by time bucket × category |
+| `GET /v1/analytics/failed-tx/by-label` | Failures grouped by labeled contract (S09 on-chain × off-chain join) |
+| `POST /v1/alert-subscriptions` | Subscribe — one-time `signing_secret` revealed (HMAC-SHA256 deliveries) |
+
+## Client examples & cookbook
+
+Drop-in clients with **zero runtime dependencies** — copy into your project
+without `npm install` / `pip install` (per [`.gsd/DECISIONS.md`](.gsd/DECISIONS.md) D017):
+
+- [`examples/typescript-client/`](examples/typescript-client/) — `fetch`-based,
+  Node 18+. Types + HMAC verifier for webhook receivers.
+- [`examples/python-client/`](examples/python-client/) — `urllib` + `hmac`
+  stdlib only, Python 3.7+.
+
+End-to-end walkthroughs (single-tx diagnosis · alert subscription + HMAC ·
+failures-by-labeled-contract) with `curl` + TypeScript + Python side by
+side: [`docs/cookbook.md`](docs/cookbook.md).
 
 ## Getting Started (Local)
 
