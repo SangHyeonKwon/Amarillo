@@ -254,17 +254,46 @@ class AmarilloError(Exception):
 
 
 class AmarilloClient:
-    """Drop-in: ``AmarilloClient("http://localhost:3000")``."""
+    """Drop-in client for Amarillo.
 
-    def __init__(self, base_url: str) -> None:
+    Read-only embeds:
+
+        client = AmarilloClient("http://localhost:3000")
+        client.get_failed_tx("0xabc…")
+
+    Write/admin calls (S16/M006) require ``api_key``:
+
+        client = AmarilloClient("http://localhost:3000", api_key=os.environ["AMARILLO_ADMIN_API_KEY"])
+        client.create_contract_label(address, label, owner_id="…")
+
+    Calling a write method without ``api_key`` set raises ``ValueError``
+    locally — surface the operator's mistake before sending an unsigned
+    request that the server would just 401 (S17/D021).
+    """
+
+    def __init__(self, base_url: str, api_key: Optional[str] = None) -> None:
         self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
 
-    def _request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        *,
+        auth: bool = False,
+    ) -> Any:
         data: Optional[bytes] = None
         headers: Dict[str, str] = {}
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
+        if auth:
+            if not self.api_key:
+                raise ValueError(
+                    "missing API key: this call requires `api_key` on AmarilloClient (S16/M006)"
+                )
+            headers["Authorization"] = f"Bearer {self.api_key}"
         req = urllib.request.Request(
             f"{self.base_url}{path}",
             data=data,
@@ -361,27 +390,38 @@ class AmarilloClient:
         error_category: Optional[ErrorCategory] = None,
         to_addr: Optional[str] = None,
     ) -> AlertSubscriptionCreated:
-        """``POST /v1/alert-subscriptions`` — ``signing_secret`` revealed exactly once."""
+        """``POST /v1/alert-subscriptions`` — ``signing_secret`` revealed exactly once.
+
+        Requires ``api_key`` set on the client (S16/M006).
+        """
         body: dict = {"webhook_url": webhook_url}
         if error_category is not None:
             body["error_category"] = error_category
         if to_addr is not None:
             body["to_addr"] = to_addr
-        r = self._request("POST", "/v1/alert-subscriptions", body)
+        r = self._request("POST", "/v1/alert-subscriptions", body, auth=True)
         return AlertSubscriptionCreated.from_dict(r["data"])
 
     def list_alert_subscriptions(self) -> List[AlertSubscription]:
-        """``GET /v1/alert-subscriptions`` — never returns ``signing_secret``."""
+        """``GET /v1/alert-subscriptions`` — never returns ``signing_secret``. Public (no api_key)."""
         r = self._request("GET", "/v1/alert-subscriptions")
         return [AlertSubscription.from_dict(s) for s in r["data"]]
 
     def delete_alert_subscription(self, sub_id: int) -> None:
-        """``DELETE /v1/alert-subscriptions/{id}`` — soft-deactivate."""
-        self._request("DELETE", f"/v1/alert-subscriptions/{sub_id}")
+        """``DELETE /v1/alert-subscriptions/{id}`` — soft-deactivate.
+
+        Requires ``api_key`` set on the client (S16/M006).
+        """
+        self._request("DELETE", f"/v1/alert-subscriptions/{sub_id}", auth=True)
 
     def rotate_alert_secret(self, sub_id: int) -> AlertSubscriptionCreated:
-        """``POST /v1/alert-subscriptions/{id}/rotate-secret`` — same one-time secret contract."""
-        r = self._request("POST", f"/v1/alert-subscriptions/{sub_id}/rotate-secret")
+        """``POST /v1/alert-subscriptions/{id}/rotate-secret`` — same one-time secret contract.
+
+        Requires ``api_key`` set on the client (S16/M006).
+        """
+        r = self._request(
+            "POST", f"/v1/alert-subscriptions/{sub_id}/rotate-secret", auth=True
+        )
         return AlertSubscriptionCreated.from_dict(r["data"])
 
     def create_contract_label(
@@ -393,14 +433,16 @@ class AmarilloClient:
         """``POST /v1/contract-labels`` — admin UPSERT (S15 / M005).
 
         Returns the row with ``address`` lowercased server-side. Calling twice
-        with the same address overwrites ``label`` / ``owner_id``. The
-        endpoint is **unauthenticated** in the demo build — production must
-        put an auth middleware in front.
+        with the same address overwrites ``label`` / ``owner_id``.
+
+        Requires ``api_key`` set on the client (S16/M006) — ``Authorization: Bearer``
+        header is attached automatically. Calling without ``api_key`` raises
+        ``ValueError`` before the request leaves the client.
         """
         body: dict = {"address": address, "label": label}
         if owner_id is not None:
             body["owner_id"] = owner_id
-        r = self._request("POST", "/v1/contract-labels", body)
+        r = self._request("POST", "/v1/contract-labels", body, auth=True)
         return ContractLabel.from_dict(r["data"])
 
     def delete_contract_label(self, address: str) -> None:
@@ -408,10 +450,12 @@ class AmarilloClient:
 
         Raises ``AmarilloError(404)`` if the address is missing. Idempotency:
         a second delete re-raises 404, which operators treat as a no-op
-        signal on retry.
+        signal on retry. Requires ``api_key`` set on the client (S16/M006).
         """
         from urllib.parse import quote
-        self._request("DELETE", f"/v1/contract-labels/{quote(address, safe='')}")
+        self._request(
+            "DELETE", f"/v1/contract-labels/{quote(address, safe='')}", auth=True
+        )
 
 
 # ── Webhook signature verification ────────────────────────────────────

@@ -13,10 +13,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 : "${DATABASE_URL:=postgres://defi:defi@localhost:5432/defi_analytics}"
+: "${AMARILLO_ADMIN_API_KEY:?required (S16/M006) — set in your env or .env. The api server fails to boot without it.}"
 PORT="${API_PORT:-3001}"
 GOOD_HASH="${GOOD_HASH:-0xdead000000000000000000000000000000000000000000000000000000000001}"
 BAD_HASH="0x0000000000000000000000000000000000000000000000000000000000000000"
-export DATABASE_URL API_HOST=127.0.0.1 API_PORT="$PORT" RUST_LOG="${RUST_LOG:-warn}"
+# Auth note (S17): this script hits only **public GET** endpoints, so no
+# Authorization header is attached to any curl. The admin key is still
+# required because ApiConfig::from_env refuses to boot without it (D023).
+export DATABASE_URL AMARILLO_ADMIN_API_KEY API_HOST=127.0.0.1 API_PORT="$PORT" RUST_LOG="${RUST_LOG:-warn}"
 
 echo "building api..."
 if ! cargo build -p api >/tmp/vftx-build.log 2>&1; then

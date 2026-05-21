@@ -18,8 +18,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 : "${DATABASE_URL:=postgres://defi:defi@localhost:5432/defi_analytics}"
+: "${AMARILLO_ADMIN_API_KEY:?required (S16/M006) — set in your env or .env. The api server fails to boot without it, and POST/DELETE/rotate-secret all require it (S17 — see docs/api-failed-tx.md#Authentication).}"
 PORT="${API_PORT:-3001}"
-export DATABASE_URL API_HOST=127.0.0.1 API_PORT="$PORT" RUST_LOG="${RUST_LOG:-warn}"
+export DATABASE_URL AMARILLO_ADMIN_API_KEY API_HOST=127.0.0.1 API_PORT="$PORT" RUST_LOG="${RUST_LOG:-warn}"
+
+# S17 — admin/write Authorization header (D021/D022). Applied to all POST/DELETE/
+# rotate-secret curl invocations below. GET endpoints (list) stay unauthenticated.
+AUTH="Authorization: Bearer ${AMARILLO_ADMIN_API_KEY}"
 
 echo "building api..."
 if ! cargo build -p api >/tmp/valerts-build.log 2>&1; then
@@ -35,10 +40,10 @@ ROTATED_SECRET=""
 RATE_ID=""
 cleanup() {
   if [ -n "$CREATED_ID" ]; then
-    curl -fsS -X DELETE "http://127.0.0.1:$PORT/v1/alert-subscriptions/$CREATED_ID" >/dev/null 2>&1 || true
+    curl -fsS -H "$AUTH" -X DELETE "http://127.0.0.1:$PORT/v1/alert-subscriptions/$CREATED_ID" >/dev/null 2>&1 || true
   fi
   if [ -n "$RATE_ID" ]; then
-    curl -fsS -X DELETE "http://127.0.0.1:$PORT/v1/alert-subscriptions/$RATE_ID" >/dev/null 2>&1 || true
+    curl -fsS -H "$AUTH" -X DELETE "http://127.0.0.1:$PORT/v1/alert-subscriptions/$RATE_ID" >/dev/null 2>&1 || true
   fi
   kill "$API_PID" 2>/dev/null || true
 }
@@ -57,7 +62,7 @@ TO_ADDR="0x00000000000000000000000000000000000000aa"
 
 # --- POST valid -> 201 ---
 pc=$(curl -s -o /tmp/valerts-create.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$URL" \
+  -H "$AUTH" -X POST "$URL" \
   --data "{\"webhook_url\":\"$WEBHOOK\",\"error_category\":\"SLIPPAGE_EXCEEDED\",\"to_addr\":\"$TO_ADDR\"}")
 echo "POST valid: HTTP $pc"
 if [ "$pc" = 201 ]; then
@@ -79,7 +84,7 @@ fi
 for BAD_URL in 'http://example.com/x' 'https://127.0.0.1/x' 'https://10.0.0.1/x' \
               'https://169.254.169.254/meta' 'https://localhost/x'; do
   bc=$(curl -s -o /tmp/valerts-bad.json -w '%{http_code}' -H 'Content-Type: application/json' \
-    -X POST "$URL" --data "{\"webhook_url\":\"$BAD_URL\"}")
+    -H "$AUTH" -X POST "$URL" --data "{\"webhook_url\":\"$BAD_URL\"}")
   if [ "$bc" = 400 ] && grep -q '"error"' /tmp/valerts-bad.json; then
     echo "POST unsafe ($BAD_URL): HTTP 400 PASS"
   else
@@ -89,13 +94,13 @@ done
 
 # --- POST bad category -> 400 ---
 cbc=$(curl -s -o /tmp/valerts-cat.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$URL" --data "{\"webhook_url\":\"https://example.test/y\",\"error_category\":\"bogus\"}")
+  -H "$AUTH" -X POST "$URL" --data "{\"webhook_url\":\"https://example.test/y\",\"error_category\":\"bogus\"}")
 echo "POST bad category: HTTP $cbc"
 if [ "$cbc" = 400 ]; then echo "  PASS"; else echo "  FAIL"; cat /tmp/valerts-cat.json; fail=1; fi
 
 # --- POST bad to_addr -> 400 ---
 tbc=$(curl -s -o /tmp/valerts-addr.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$URL" --data "{\"webhook_url\":\"https://example.test/z\",\"to_addr\":\"0xnothex\"}")
+  -H "$AUTH" -X POST "$URL" --data "{\"webhook_url\":\"https://example.test/z\",\"to_addr\":\"0xnothex\"}")
 echo "POST bad to_addr: HTTP $tbc"
 if [ "$tbc" = 400 ]; then echo "  PASS"; else echo "  FAIL"; cat /tmp/valerts-addr.json; fail=1; fi
 
@@ -104,7 +109,7 @@ RATE_WEBHOOK="https://example.test/rate-$SUFFIX"
 
 # POST rate_threshold valid -> 201 with sub_type + rate fields
 rpc=$(curl -s -o /tmp/valerts-rate.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$URL" \
+  -H "$AUTH" -X POST "$URL" \
   --data "{\"webhook_url\":\"$RATE_WEBHOOK\",\"sub_type\":\"rate_threshold\",\"threshold_count\":5,\"threshold_window_secs\":60,\"debounce_secs\":300}")
 echo "POST rate valid: HTTP $rpc"
 if [ "$rpc" = 201 ]; then
@@ -131,7 +136,7 @@ for BAD_RATE in \
   '{"webhook_url":"https://example.test/r3","sub_type":"rate_threshold","threshold_count":0,"threshold_window_secs":60,"debounce_secs":0}' \
   '{"webhook_url":"https://example.test/r4","sub_type":"rate_threshold","threshold_count":5,"threshold_window_secs":-1,"debounce_secs":0}'; do
   rbc=$(curl -s -o /tmp/valerts-rbad.json -w '%{http_code}' -H 'Content-Type: application/json' \
-    -X POST "$URL" --data "$BAD_RATE")
+    -H "$AUTH" -X POST "$URL" --data "$BAD_RATE")
   if [ "$rbc" = 400 ] && grep -q '"error"' /tmp/valerts-rbad.json; then
     echo "POST bad rate ($(echo "$BAD_RATE" | cut -c1-60)…): HTTP 400 PASS"
   else
@@ -141,7 +146,7 @@ done
 
 # POST per_event with rate fields -> 400 (mixed combination)
 mc=$(curl -s -o /tmp/valerts-mix.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$URL" \
+  -H "$AUTH" -X POST "$URL" \
   --data '{"webhook_url":"https://example.test/mix","sub_type":"per_event","threshold_count":5,"threshold_window_secs":60,"debounce_secs":0}')
 echo "POST per_event + rate fields: HTTP $mc"
 if [ "$mc" = 400 ] && grep -q '"error"' /tmp/valerts-mix.json; then
@@ -152,7 +157,7 @@ fi
 
 # POST sub_type=bogus -> 400
 bsc=$(curl -s -o /tmp/valerts-bsub.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$URL" \
+  -H "$AUTH" -X POST "$URL" \
   --data '{"webhook_url":"https://example.test/bsub","sub_type":"bogus"}')
 echo "POST sub_type=bogus: HTTP $bsc"
 if [ "$bsc" = 400 ] && grep -q '"error"' /tmp/valerts-bsub.json; then
@@ -205,7 +210,7 @@ fi
 
 # --- ROTATE secret (HARDEN2-T02): 200 with NEW signing_secret ---
 if [ -n "$CREATED_ID" ]; then
-  rc=$(curl -s -o /tmp/valerts-rot.json -w '%{http_code}' -X POST "$URL/$CREATED_ID/rotate-secret")
+  rc=$(curl -s -o /tmp/valerts-rot.json -w '%{http_code}' -H "$AUTH" -X POST "$URL/$CREATED_ID/rotate-secret")
   echo "ROTATE $CREATED_ID: HTTP $rc"
   if [ "$rc" = 200 ]; then
     ROTATED_SECRET=$(node -e "
@@ -245,7 +250,7 @@ if [ -n "$CREATED_ID" ]; then
 fi
 
 # --- ROTATE nonexistent -> 404 ---
-rnc=$(curl -s -o /tmp/valerts-rnx.json -w '%{http_code}' -X POST "$URL/999999999/rotate-secret")
+rnc=$(curl -s -o /tmp/valerts-rnx.json -w '%{http_code}' -H "$AUTH" -X POST "$URL/999999999/rotate-secret")
 echo "ROTATE 999999999: HTTP $rnc"
 if [ "$rnc" = 404 ] && grep -q '"error"' /tmp/valerts-rnx.json; then
   echo "  PASS"
@@ -255,12 +260,12 @@ fi
 
 # --- DELETE existing -> 204 ---
 if [ -n "$CREATED_ID" ]; then
-  dc=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$URL/$CREATED_ID")
+  dc=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE "$URL/$CREATED_ID")
   echo "DELETE $CREATED_ID: HTTP $dc"
   if [ "$dc" = 204 ]; then echo "  PASS"; else echo "  FAIL"; fail=1; fi
 
   # --- ROTATE inactive (just deactivated) -> 404 ---
-  ric=$(curl -s -o /tmp/valerts-rinact.json -w '%{http_code}' -X POST "$URL/$CREATED_ID/rotate-secret")
+  ric=$(curl -s -o /tmp/valerts-rinact.json -w '%{http_code}' -H "$AUTH" -X POST "$URL/$CREATED_ID/rotate-secret")
   echo "ROTATE $CREATED_ID (inactive): HTTP $ric"
   if [ "$ric" = 404 ] && grep -q '"error"' /tmp/valerts-rinact.json; then
     echo "  PASS"
@@ -269,7 +274,7 @@ if [ -n "$CREATED_ID" ]; then
   fi
 
   # --- DELETE same id again -> 404 (already inactive) ---
-  d2=$(curl -s -o /tmp/valerts-d2.json -w '%{http_code}' -X DELETE "$URL/$CREATED_ID")
+  d2=$(curl -s -o /tmp/valerts-d2.json -w '%{http_code}' -H "$AUTH" -X DELETE "$URL/$CREATED_ID")
   echo "DELETE $CREATED_ID (again): HTTP $d2"
   if [ "$d2" = 404 ] && grep -q '"error"' /tmp/valerts-d2.json; then
     echo "  PASS"
@@ -280,12 +285,33 @@ if [ -n "$CREATED_ID" ]; then
 fi
 
 # --- DELETE nonexistent -> 404 ---
-nc=$(curl -s -o /tmp/valerts-nx.json -w '%{http_code}' -X DELETE "$URL/999999999")
+nc=$(curl -s -o /tmp/valerts-nx.json -w '%{http_code}' -H "$AUTH" -X DELETE "$URL/999999999")
 echo "DELETE 999999999: HTTP $nc"
 if [ "$nc" = 404 ] && grep -q '"error"' /tmp/valerts-nx.json; then
   echo "  PASS"
 else
   echo "  FAIL"; cat /tmp/valerts-nx.json; fail=1
+fi
+
+# --- AUTH (S17): missing header -> 401 (info-leak 방지로 단일 응답) ---
+nac=$(curl -s -o /tmp/valerts-noauth.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$URL" --data '{"webhook_url":"https://example.test/noauth"}')
+echo "POST no auth header: HTTP $nac"
+if [ "$nac" = 401 ] && grep -q '"error":"unauthorized"' /tmp/valerts-noauth.json; then
+  echo "  PASS"
+else
+  echo '  FAIL — expected 401 {"error":"unauthorized"}'; cat /tmp/valerts-noauth.json; fail=1
+fi
+
+# --- AUTH (S17): wrong key -> 401 (same response as missing — info-leak 방지) ---
+wac=$(curl -s -o /tmp/valerts-wauth.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer wrong-key-xxxxxxxxxx" \
+  -X POST "$URL" --data '{"webhook_url":"https://example.test/wrongkey"}')
+echo "POST wrong key: HTTP $wac"
+if [ "$wac" = 401 ] && grep -q '"error":"unauthorized"' /tmp/valerts-wauth.json; then
+  echo "  PASS"
+else
+  echo '  FAIL — expected 401 {"error":"unauthorized"}'; cat /tmp/valerts-wauth.json; fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then
