@@ -27,6 +27,9 @@ services:
       API_PORT: "3000"
       MAX_DB_CONNECTIONS: "10"
       RUST_LOG: api=info,db=info
+      # S16/M006/D023 — required, no silent default (ApiConfig::from_env will fail).
+      # ${VAR:?msg} forces an error at compose start rather than a delayed runtime crash.
+      AMARILLO_ADMIN_API_KEY: ${AMARILLO_ADMIN_API_KEY:?required (S16/M006)}
     depends_on:
       postgres:
         condition: service_healthy

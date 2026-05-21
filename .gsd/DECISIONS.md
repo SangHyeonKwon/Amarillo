@@ -331,3 +331,102 @@
   `Err`로 반환) + 기존 `webhook_url_is_safe` 단위테스트 무회귀 + verify-alerts.sh
   무회귀. 라이브 DNS rebinding 시뮬은 mock DNS server 필요 — 환경 부담 큼,
   수동 스모크(공격 시뮬 도구 별도)로 위임.
+
+## D021 — M006 인증 모델: API key (Bearer) + write/admin만 보호 + env 단일 키
+
+- **결정**: M006 인증은 **(A + X + 1) 묶음**.
+  - **A: API key (Bearer)** — `Authorization: Bearer <key>` 헤더. JWT(HS256) /
+    OAuth client_credentials 미선택.
+  - **X: write/admin만 보호** — POST/PUT/DELETE 라우트만 401, GET 전부 공개
+    유지(임베드성 보존). 일부 GET 보호(Y) / 전체 GET 보호(Z) 미선택.
+  - **1: env 단일 키** — `AMARILLO_ADMIN_API_KEY` 미설정 = 부팅 실패(silent
+    default 금지, D004 정신). DB `api_key` 테이블(2) 미도입.
+- **이유**:
+  - 호출처 전부 *서버↔서버*(운영자/봇 운영자 스크립트, examples client, FE
+    서버 측). 사람 OAuth 흐름·multi-tenant scope·short-lived expiry는 *현재
+    요구 없음* — D017 정신(첫 사용자 요청 후 확장).
+  - 임베드성(M001 핵심 가치)을 *읽기 측에 보존* — `/v1/failed-tx/{tx_hash}`
+    단건 진단은 공개 GET이어야 외부 위젯 임베드 가능. 알림 시크릿은 *write
+    흐름*에서만 노출(`secret-once` 응답 + PUT 회전) — 둘 다 이미 write라 X로
+    충분.
+  - env 단일 키는 데모→운영 1차 진입에 충분 + 마이그레이션 0 + 발급 흐름 0.
+    다중 운영자/scope/audit은 첫 요구 후 별 슬라이스(M006.1 후보).
+- **스코프 (보호 대상 X 정책 확정)**:
+  - `POST /v1/contract-labels` (S15)
+  - `DELETE /v1/contract-labels/{address}` (S15)
+  - `POST /v1/alert-subscriptions` (S08)
+  - `DELETE /v1/alert-subscriptions/{id}` (S08, soft 비활성화)
+  - `POST /v1/alert-subscriptions/{id}/rotate-secret` (HARDEN2)
+  - GET: failed-tx / analytics / blocks / pools / tokens / swaps / traders /
+    `GET /v1/alert-subscriptions` / health — **전부 비보호**.
+- **트레이드오프**:
+  - env 단일 키는 회전 = env 갱신 + **재시작**(runtime 회전 X). 무중단 회전
+    필요 시 DB 테이블(2)로 이전. 단일 키는 *공유 시크릿* — 운영자별 audit 추적
+    X (로그 IP/UA에 의존).
+  - 키 분실/노출 시 즉시 회전 가능하지만 모든 클라이언트(verify 스크립트 ·
+    examples · 프론트)가 동시에 갱신 필요. multi-key 운영(예: 운영 키 + 봇 키
+    별도)은 본 마일스톤 스코프 밖.
+  - JWT의 expiry 보호 부재 — 키 유출 시 회전 전까지 무한 유효. 운영 측 회전
+    절차(예: 90일마다)로 보완 — *cookbook 명시*.
+  - GET 비보호는 *내부 데이터 노출* 위험은 없음(이미 공개 블록체인 데이터) +
+    임베드성 보존이지만, *DoS 방어*는 별 단위(rate limiting 미도입).
+- **검증 제약(D009~D020 일관)**: 401 단언 통합테스트 + verify 스크립트 401
+  case 1건 + 키 비교 상수시간 단위테스트(타이밍 attack은 *시뮬 어려움* → 알고리즘
+  사용만 단언). 라이브 운영 회전·키 유출 대응은 운영 측 책임 + 절차 문서화.
+
+## D022 — 인증 라우트 게이트: 미들웨어 대신 핸들러별 extractor
+
+- **결정**: 인증 미들웨어를 *전역 layer*로 도입하지 않고, 보호 대상 핸들러에
+  **`AdminAuth` extractor를 첫 파라미터로 추가**해 게이트한다. 비보호 라우트는
+  extractor 미부착으로 자연스럽게 공개.
+- **이유**:
+  - axum 라우트 분리(`auth_router`/`public_router`)는 *라우트 트리 이중화* —
+    `with_state` / `nest` 트리에 표면이 두 번 등장하면 회귀 위험 ↑.
+  - layer 기반 보호는 *URL 매칭으로 필터* — 보호 표면이 URL 패턴에 묶이면 새
+    write 라우트 추가 시 *layer 등록 깜빡* 회귀(`POST /v1/contract-labels`
+    추가했는데 layer에 안 박힘 등) 가능.
+  - extractor 게이트는 *핸들러 시그니처 자체*에 보호가 박힘 — 보호 라우트의
+    핸들러는 *반드시* `AdminAuth`를 가져야 컴파일됨. 컴파일러가 회귀 차단.
+  - tower layer는 미들웨어 *체인* 비용이 더 큼(매 요청). extractor는 보호
+    라우트만 비용 부담.
+- **스코프**: `crates/api/src/auth.rs` 신설 — `AdminAuth` 단위 구조체 +
+  `FromRequestParts` 구현 + `subtle::ConstantTimeEq` 사용. `ApiConfig`에
+  `admin_api_key: String` 필드(필수, env 부재 시 from_env 에러) + Debug에서
+  마스킹(HARDEN2 정신, `***`). state는 `Arc<ApiState { db_pool, admin_api_key }>`로
+  확장 — 기존 `PgPool` state는 nested 트리.
+- **트레이드오프**:
+  - 라우트 분리(layer)에 비해 *어떤 라우트가 보호되는가*가 라우터 코드에
+    한눈에 안 보임 — 핸들러 시그니처를 봐야 확인 가능. 보완: routes/mod.rs
+    주석 + S16 PLAN의 *보호 대상 표* + 통합테스트 401 case가 회귀 차단.
+  - extractor는 의존 1개 추가(`subtle` — 작고 `no_std` ✅). 자체 ct_eq도
+    가능하지만 *crypto-grade 비교는 검증된 라이브러리 사용*이 표준(HMAC 비교는
+    이미 `hmac::Mac::verify_slice` 내부에서 같은 패턴).
+- **검증 제약(D021 일관)**: extractor 단위테스트(헤더 없음 / "Bearer" 누락 /
+  잘못된 키 / 올바른 키) + 401 통합테스트 + clippy/fmt.
+
+## D023 — 키 저장: env 단일 키, 길이 권고 (32바이트+) — 거부 X
+
+- **결정**: `AMARILLO_ADMIN_API_KEY`는 *문자열* env 단일 값. 길이 검사:
+  부팅 시 32바이트(hex 64자) 미만이면 **WARN 로그**만 — *거부는 X*. 빈 문자열
+  ("" 또는 미설정)은 *부팅 실패*. 키 형식 자체는 free-form (운영자 자유).
+- **이유**:
+  - 거부하면 운영자가 *임시 데모 환경*(짧은 키)에서 부팅 막힘 — 운영 유연성과
+    안전성의 균형. 32바이트는 *권고*(엔트로피 충분)지 *요구*는 아님 — 운영
+    문서가 강조.
+  - 부팅 실패는 *silent default 금지* 정신(D004) — 키 없는 운영은 *고의적 위험*
+    이지 *실수로 발생*이면 안 됨. 빈 문자열 거부로 "키를 박았는지" 게이트.
+  - free-form 키 형식 — UUID / random hex / 비밀번호 매니저 출력 모두 허용.
+    *형식 강제는 사용자 부담* + 보안 이득 0(엔트로피만 중요).
+- **스코프**: `ApiConfig::from_env` — `env::var("AMARILLO_ADMIN_API_KEY")` →
+  `Err(anyhow!)` if missing, `trim().is_empty()` 시도 동일 처리. 길이 < 32면
+  `tracing::warn!`로 1줄 출력. Debug derive에서 키 필드는 `***`로 마스킹
+  (`ApiConfig.debug_fmt` 커스텀 또는 wrapper 타입).
+- **트레이드오프**:
+  - 키 회전 = env 갱신 + 재시작 (D021 트레이드오프 일관). 무중단은 multi-key
+    runtime 회전 — *별 슬라이스*.
+  - 짧은 키 허용은 *운영 실수* 가능(예: `key=test` 박고 잊음). cookbook이
+    *권고 길이 + 회전 절차* 명시로 보완.
+  - 키 형식 검증 X로 *typo 감지 X* — 운영자가 키 카피 실패 시 부팅은 성공·요청은
+    401. 첫 호출 직후 즉시 발견되어 실무 위험 낮음.
+- **검증 제약(D021 일관)**: ApiConfig 단위테스트(env 미설정 / 빈 문자열 /
+  짧은 키 [WARN] / 정상 키) + Debug에서 키 미노출 단언.

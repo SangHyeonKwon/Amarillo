@@ -103,6 +103,57 @@ M005는 새 페르소나 진입 — *건별* 알림(S08)은 봇 운영자에게 
 - `scripts/verify-failed-tx-by-label.sh`에 POST/DELETE round-trip 단언 추가.
 - (S16 흡수 — 별 슬라이스 미생성, M005 마감 묶음.)
 
+## M006 — Operator Auth (출하 정의)
+
+> "amarillo의 모든 write/admin 엔드포인트가 API key 인증으로 보호되고, 모든
+> 검증·예시·프론트 흐름이 인증된 호출로 동작한다."
+
+페르소나 = **운영자**(D021). M001~M005는 "데모 스코프 인증 미부착"(D008/D013/D019)
+정직성으로 마감했으나 외부 노출 시 *별 마일스톤 가치*. 본 마일스톤은 인증
+미들웨어를 *별 슬라이스로 분해*해 단일 PR 부담을 분산 — write/admin만 보호
+(GET은 임베드성 보존, X), env 단일 키(scope/multi-key X, 1), API key Bearer
+헤더(JWT/OAuth X, A).
+
+M005 분해 패턴 일관: **M006 = S16 ∧ S17 ∧ S18.**
+
+**S16 — 인증 미들웨어 + 보호 게이트** 수용 기준 (mechanically checkable):
+- `AMARILLO_ADMIN_API_KEY` env 미설정 또는 빈 문자열 → 서버 **부팅 실패**
+  (silent default 금지, D004 정신). 32바이트 이상(hex 64자) 권고(부팅 시 길이
+  부족 WARN 로깅, 거부 X — 운영 유연성).
+- axum extractor(`AdminAuth` from_request_parts) — `Authorization: Bearer <key>`
+  헤더 누락/형식 오류/키 불일치 모두 **401** `{"error":"unauthorized"}`. 헤더는
+  있으나 키 불일치는 *동일 401* (info-leak 방지 — 키 존재 여부 노출 X).
+- 키 비교는 **상수시간** (`subtle::ConstantTimeEq` 또는 자체 ct_eq) — timing
+  attack 방어.
+- 보호 대상 (X 정책): `POST /v1/contract-labels`, `DELETE /v1/contract-labels/{address}`,
+  `POST /v1/alert-subscriptions`, `DELETE /v1/alert-subscriptions/{id}`,
+  `POST /v1/alert-subscriptions/{id}/rotate-secret`. GET 전부 비보호.
+- 키는 **로그에 절대 미노출** (`ApiConfig` Debug에서 마스킹 — HARDEN2 정신).
+- `ApiError::Unauthorized` variant 추가 + 통합테스트(헤더 없음 / 잘못된 헤더 /
+  잘못된 키 → 모두 401, 올바른 키 → 기존 200/201/204).
+
+**S17 — verify 스크립트 3종 + examples 클라이언트(TS/Python) + cookbook 인증** 수용 기준:
+- `scripts/verify-{failed-tx,alerts,failed-tx-by-label}.sh` 모두 `${AMARILLO_ADMIN_API_KEY}`
+  env 읽기 — 미설정 시 **즉시 실패**(silent skip 금지). 보호 라우트 호출에
+  `Authorization: Bearer ${key}` 헤더 추가, 잘못된 키 401 시나리오 1건 추가.
+- `examples/typescript-client/client.ts`: `new AmarilloClient({baseUrl, apiKey?})`
+  로 옵션 가산 — `apiKey` 있으면 모든 *write* 요청에 `Authorization: Bearer`
+  헤더 자동 부착, GET은 없으면 미부착(임베드성). `tsc --noEmit` clean.
+- `examples/python-client/client.py`: 동일 — `AmarilloClient(base_url, api_key=None)`,
+  `py_compile` clean.
+- `docs/cookbook.md` 4 시나리오 모두 인증 헤더 명시 — 봇 운영자 시나리오 step 1·2
+  (라벨 등록 / sub 생성)에 `Authorization: Bearer` 추가, 401 사례 1건 명시.
+- `docs/api-failed-tx.md`에 "Authentication" 섹션 추가 — env 키 정책 + 보호
+  대상 표 + curl 예시.
+
+**S18 — 프론트 `/alerts` 페이지 + M006 마감** 수용 기준:
+- `web/`의 `/alerts` 페이지: API 호출 시 인증 헤더 부착 — `NEXT_PUBLIC_AMARILLO_ADMIN_API_KEY`
+  env 또는 페이지 상단 키 입력 UI(*세션 메모리만*, localStorage 미저장 — XSS
+  표면 최소화). 키 미설정 시 *생성/회전/비활성* 버튼 비활성 + 안내 배너.
+- 401 응답 처리 — 명확한 에러 메시지("Unauthorized — check API key").
+- `web` typecheck/test/build clean. M006 마감 cookbook 4번째 시나리오 step 1·2의
+  curl/TS/Python 모두 인증 헤더 시연.
+
 ## 공통 비기능 요건
 
 - CLAUDE.md 절대 규칙 준수 (no `unwrap()` in prod, parameterized SQL, 마이그레이션 경유 등 — KNOWLEDGE.md)

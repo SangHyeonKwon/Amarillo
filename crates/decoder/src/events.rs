@@ -347,6 +347,11 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cmp_owned)]
+    // S16/M006 게이트 통과 시점 toolchain (rust-clippy 1.92)에서 `BigDecimal::from(0)`
+    // 비교가 cmp_owned로 잡힘 — 의도는 "양수 확인", BigDecimal의 const ZERO가
+    // 없어 named binding으로 빼도 lint 회피만 됨. 실측 영향 없음(test code), 별
+    // 단위 hardening 후보.
     fn test_decode_swap_event() {
         let (topics, data) = make_swap_log();
         let result = decode_log(&topics, &data, "0xpool", "0xtx", 0, Utc::now());

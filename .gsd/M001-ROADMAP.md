@@ -139,6 +139,60 @@ web 29/build 900/TS tsc/Python py_compile).
 
 ---
 
+## M006 — Operator Auth  🚧 IN PROGRESS (S16 ✅ → S17 → S18)
+출하 정의: REQUIREMENTS.md#M006. "amarillo의 모든 write/admin 엔드포인트가
+API key 인증으로 보호되고, 모든 검증·예시·프론트 흐름이 인증된 호출로 동작한다."
+페르소나 = **운영자**(D021). M005까지의 "데모 스코프 인증 미부착"(D008/D013/D019)
+정직성을 *운영 게이트*로 마감. 결정 묶음 **(A) API key Bearer + (X) write/admin
+만 보호 + (1) env 단일 키** — D021/D022/D023.
+
+- [x] **S16 — 인증 미들웨어 + 보호 게이트** `[edge: untapped — 운영 게이트]` · risk: med · **DONE** → S16-SUMMARY.md
+  - T01 인프라: `crates/api/src/auth.rs` (AdminAuth + `subtle::ConstantTimeEq`)
+    + `ApiConfig.admin_api_key` 필수 + Debug 마스킹(database_url + admin_api_key)
+    + `ApiError::Unauthorized` + `routes/state.rs` (ApiState + FromRef) + `.env.example`/
+    `docker-compose.yml` env 박음. 단위테스트 13(config 6 + auth 7).
+  - T02 게이트: 보호 라우트 5개 핸들러에 `_: AdminAuth` 첫 파라미터 부착
+    (POST/DELETE `/v1/contract-labels`, POST/DELETE/rotate `/v1/alert-subscriptions`).
+    `crates/api/src/lib.rs` 신설(통합테스트용 표준 패턴), 통합테스트 7(보호 5 + 비보호 2).
+  - 게이트: fmt clean / clippy --workspace --all-targets -D warnings 0 / api 20 /
+    indexer 36 / db --lib 17 / db --ignored 27 / decoder 18 / web typecheck/test 29/build OK.
+  - **D021** (A+X+1 묶음) · **D022** (extractor 게이트, 컴파일 시점 회귀 차단) · **D023** (env 단일 키, 빈 거부 + 짧으면 WARN).
+  - 정직한 한계: verify 2종(alerts / failed-tx-by-label) + examples + 프론트
+    *깨짐* — S17/S18 명시적 의존. toolchain 회귀 lint 2건 인라인 fix(별 단위 후보).
+
+- [ ] **S17 — verify 스크립트 + examples + cookbook 인증** · risk: low · **READY** (sketch 해제 — S16 완료로 인프라 기반 마련)
+  - **T01 — verify 스크립트 3종 인증 헤더 + 401 case**:
+    - `scripts/verify-failed-tx.sh`: `${AMARILLO_ADMIN_API_KEY}` 읽기(미설정 시 즉시 실패),
+      공개 GET만 호출이지만 *인증 헤더가 GET에 부착되어도 무회귀* 단언(향후 GET 보호 시 안전).
+    - `scripts/verify-alerts.sh`: 보호 라우트 호출(POST/DELETE/rotate)에 `Authorization: Bearer ${key}`
+      헤더 추가, 잘못된 키 401 케이스 1건 추가, 기존 S08/S14 시나리오 무회귀.
+    - `scripts/verify-failed-tx-by-label.sh`: POST/DELETE 호출에 헤더 추가, S15 시나리오 무회귀,
+      잘못된 키 401 케이스 1건.
+  - **T02 — examples client (TS/Python) apiKey 옵션 가산**:
+    - `examples/typescript-client/client.ts`: `interface ClientOptions { baseUrl: string;
+      apiKey?: string }`, write 메서드(`createContractLabel` / `deleteContractLabel` /
+      `createAlertSubscription` / `deactivateAlertSubscription` / `rotateAlertSubscriptionSecret`)에
+      자동 `Authorization` 헤더 부착, GET 무부착(임베드성). `tsc --noEmit` clean.
+    - `examples/python-client/client.py`: `AmarilloClient(base_url, api_key=None)`, 동일 패턴.
+      `py_compile` clean.
+  - **T03 — cookbook 4 시나리오 + docs Authentication 섹션**:
+    - `docs/cookbook.md`: 4 시나리오 모두 *인증 헤더 명시* — 봇 운영자 step 1·2에 `Authorization: Bearer`
+      curl + TS + Python 부착, 401 사례 1건 추가.
+    - `docs/api-failed-tx.md`에 "Authentication" 섹션 추가 — env 키 정책 + 보호 대상 표 + 401 응답
+      형식 + curl 예시.
+  - 게이트: clippy/fmt 무회귀 / api 단위·통합 무회귀 / indexer + db lib·ignored + decoder 무회귀
+    / TS `tsc --noEmit` clean / Python `py_compile` clean / verify 3종 ALL PASS (인증 헤더 적용 후).
+
+- [ ] **S18 — 프론트 `/alerts` + M006 마감** `[sketch]` · risk: low
+  - `/alerts` 페이지 키 입력 UI(세션만, localStorage X) + 401 처리 + 키 미설정
+    시 write 버튼 비활성.
+  - (S17 출하 후 sketch 해제 — GSD-2 원칙 일관)
+
+> M006 출하 = S16 ∧ S17 ∧ S18. **S16 ✅ → S17 진입 가능**. 분해 비용은 verify 3종 +
+> examples 2종 + 프론트 인증 흐름 동시 갱신 — 단일 PR 부담을 슬라이스로 분산.
+
+---
+
 ## 백로그
 
 미완료 항목은 [`BACKLOG.md`](BACKLOG.md)에 통합(가치/리스크/페르소나/사전조건/크기
@@ -157,7 +211,8 @@ web 29/build 900/TS tsc/Python py_compile).
 
 ## Reassess 규칙 (GSD-2)
 각 슬라이스 Complete 후 이 ROADMAP 갱신: 다음 슬라이스 `[sketch]` 해제·태스크 분해,
-새 Lesson은 KNOWLEDGE.md, 방향 변경은 DECISIONS.md. M001·M002·M003·M004·**M005 모두
-출하 완료** → 다음 마일스톤(M006) 또는 단독 슬라이스 분해는 사용자 지시 시
-(GSD-2: 출하 전 분해 금지 원칙 일관). 후보는 [`BACKLOG.md`](BACKLOG.md) 우선순위
-표 + M005-SUMMARY.md "잔여" 섹션 참조.
+새 Lesson은 KNOWLEDGE.md, 방향 변경은 DECISIONS.md. M001·M002·M003·M004·M005 모두
+출하 완료 → **M006 분기 진행 중**(S16 → S17 → S18). 각 슬라이스 완료 후 다음
+sketch 해제. 후속 마일스톤(M007 등) 또는 단독 슬라이스 분해는 M006 출하 후
+사용자 지시 시 (GSD-2: 출하 전 분해 금지 원칙 일관). 후보는 [`BACKLOG.md`](BACKLOG.md)
+우선순위 표 참조.
