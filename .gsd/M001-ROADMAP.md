@@ -92,7 +92,6 @@ db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
   - `FailedTxDetail.failing_function_decoded: DecodedFunction | null` 가산
     (D004 일관, silent default 금지) + DB lookup + 핸들러 가산 + 통합테스트 4 +
     verify DECODED semantics + 프론트 KPI 갱신. **D015** (args 분리, 자기시드 정책).
-- [ ] **S11.1 — args 디코딩 + root_cause input 디코드** `[sketch]` `[edge: weak-spot]` *(M005 후보 — 깊이 추가)*
 - [x] **S12 — 카테고리 진단 메시지 + 추천 액션** `[edge: weak-spot]` · risk: low-med · **DONE** → S12-SUMMARY.md
   - `category_diagnosis(error_category PK, message, recommended_action?, source?)`
     멱등 + 6 카테고리 시드(UNKNOWN/INSUFFICIENT_BALANCE/SLIPPAGE_EXCEEDED/
@@ -101,7 +100,6 @@ db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
     + `ErrorCategory::as_wire()` public 메서드 + DB lookup + 핸들러 가산 + 통합테스트 3
     + verify DIAG semantics(시드된 카테고리는 non-null 의미 단언) + 프론트 강조 블록.
     **D016** (스코프: 메시지+액션, enum 세분화는 S12.1).
-- [ ] **S12.1 — error_category enum 세분화 (v2)** `[sketch]` `[edge: weak-spot]` *(M005 후보 — 정밀도)*
 - [x] **S13 — 개발자 예시 클라이언트(TS+Python) + cookbook** `[edge: weak-spot]` · risk: low · **DONE** → S13-SUMMARY.md
   - `examples/typescript-client/` (fetch + node:crypto, 외부 의존 0, ambient.d.ts로
     npm 무도입) — `AmarilloClient` 전 엔드포인트 + `verifyAlertSignature` + 3 시나리오
@@ -109,28 +107,27 @@ db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
   - `docs/cookbook.md` — 3 시나리오에 curl + TS + Python 3중 예시 + "M004 in one paragraph"
   - README.md 갱신 — Failure Intelligence API 표 확장 + "Client examples & cookbook" 신설
   - **D017** (예시 = SDK 동일, 게시는 S13.1)
-  - **M004 acceptance 완성** — SHIPPED 선언 여부는 사용자 결정 대기
-- [ ] **S13.1 — SDK 패키지화(npm/PyPI 게시)** `[sketch]` (D017) *(M005 후보 — 운영성)*
+
+> M005 후보 sketch(S11.1 / S12.1 / S13.1)와 단독 백로그(DNS-time SSRF / 임계율 집계
+> / Pools·Traders 매핑)는 [`BACKLOG.md`](BACKLOG.md) — 가치·리스크·페르소나·사전조건·크기 정리됨.
 
 ---
 
-## 백로그 (이월 · 우선순위 미정)
+## 백로그
 
-- [x] **TEST-HARNESS** — `crates/db` cargo 통합테스트 하니스. **DONE** → STH-SUMMARY.md
-      (`crates/db/tests/failed_tx.rs` 4건, `cargo test -p db -- --ignored`, D007 RESOLVED)
-- [x] **S04 하드닝 항목 (리뷰 L1–L3)**: S04에서 해소(명시 컬럼·tx_hash 400·call_tree 상한).
-- [x] **HARDEN** — S07-PLAN R3/R4 + S08 리뷰 M1/M2/L3. **DONE** → HARDEN-SUMMARY.md
-      (follow cycle cap + ctrl_c granularity / outbox claim + stale recovery / bounded
-      parallelism + mock-receiver wire e2e)
-- [x] **FE-WIRE (R2)** — contract sync + Failed Tx 페이지 3섹션 재결선. **DONE** → FE-WIRE-SUMMARY.md
-      (`useFailedTxDetail`/`useFailedTxList`/`useFailedTxTimeseries` + 실제 timeseries
-      차트 + 페이지네이션 있는 목록 + tx 인스펙션 드릴다운; 알림 구독 UI는 FE-WIRE2로 분리)
-- [x] **FE-WIRE2** — `/alerts` 페이지 (목록 + 생성 + 회전 + 비활성 + 시크릿 1회 모달).
-      **DONE** → FE-WIRE2-SUMMARY.md (apiPost/apiDelete + 4 hooks + AlertSubscription/Created
-      타입 분리; mutation.reset()으로 시크릿 캐시 폐기)
-- [x] **HARDEN2** — last_error URL 마스킹 + signing_secret 회전 API. **DONE** → HARDEN2-SUMMARY.md
-- [ ] **HARDEN 잔여**: DNS-time SSRF 검사(custom DNS resolver, 단독 PR 가치) /
-      임계·율 집계(D012 MVP 제외분, 제품 슬라이스 수준).
+미완료 항목은 [`BACKLOG.md`](BACKLOG.md)에 통합(가치/리스크/페르소나/사전조건/크기
++ 우선순위 표). 마일스톤 분기 시 그쪽을 *시드*로 사용.
+
+완료 백로그 (한 줄 압축):
+
+| 항목 | 결과 |
+|------|------|
+| TEST-HARNESS — db cargo 통합테스트 하니스 | D007 RESOLVED · STH-SUMMARY.md |
+| S04 하드닝 (리뷰 L1–L3) — 명시컬럼 / tx_hash 400 / call_tree 상한 | S04에서 해소 · S04-SUMMARY.md |
+| HARDEN — follow cycle cap + ctrl_c + outbox claim + bounded + mock receiver | HARDEN-SUMMARY.md |
+| HARDEN2 — last_error URL 마스킹 + signing_secret 회전 API | HARDEN2-SUMMARY.md |
+| FE-WIRE — Failed Tx 페이지 3섹션 재결선(timeseries/list/inspect) | FE-WIRE-SUMMARY.md |
+| FE-WIRE2 — `/alerts` 페이지(목록·생성·회전·비활성·시크릿 1회 모달) | FE-WIRE2-SUMMARY.md |
 
 ## Reassess 규칙 (GSD-2)
 각 슬라이스 Complete 후 이 ROADMAP 갱신: 다음 슬라이스 `[sketch]` 해제·태스크 분해,
