@@ -32,9 +32,13 @@ API_PID=$!
 CREATED_ID=""
 INITIAL_SECRET=""
 ROTATED_SECRET=""
+RATE_ID=""
 cleanup() {
   if [ -n "$CREATED_ID" ]; then
     curl -fsS -X DELETE "http://127.0.0.1:$PORT/v1/alert-subscriptions/$CREATED_ID" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$RATE_ID" ]; then
+    curl -fsS -X DELETE "http://127.0.0.1:$PORT/v1/alert-subscriptions/$RATE_ID" >/dev/null 2>&1 || true
   fi
   kill "$API_PID" 2>/dev/null || true
 }
@@ -94,6 +98,88 @@ tbc=$(curl -s -o /tmp/valerts-addr.json -w '%{http_code}' -H 'Content-Type: appl
   -X POST "$URL" --data "{\"webhook_url\":\"https://example.test/z\",\"to_addr\":\"0xnothex\"}")
 echo "POST bad to_addr: HTTP $tbc"
 if [ "$tbc" = 400 ]; then echo "  PASS"; else echo "  FAIL"; cat /tmp/valerts-addr.json; fail=1; fi
+
+# --- S14/M005: rate_threshold scenarios ---
+RATE_WEBHOOK="https://example.test/rate-$SUFFIX"
+
+# POST rate_threshold valid -> 201 with sub_type + rate fields
+rpc=$(curl -s -o /tmp/valerts-rate.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$URL" \
+  --data "{\"webhook_url\":\"$RATE_WEBHOOK\",\"sub_type\":\"rate_threshold\",\"threshold_count\":5,\"threshold_window_secs\":60,\"debounce_secs\":300}")
+echo "POST rate valid: HTTP $rpc"
+if [ "$rpc" = 201 ]; then
+  RATE_ID=$(node -e '
+    const d = (require("/tmp/valerts-rate.json").data) || {};
+    if (d.sub_type !== "rate_threshold") { console.error("sub_type missing/wrong"); process.exit(1); }
+    if (d.threshold_count !== 5 || d.threshold_window_secs !== 60 || d.debounce_secs !== 300) {
+      console.error("rate fields mismatch"); process.exit(1);
+    }
+    if (typeof d.signing_secret !== "string" || d.signing_secret.length !== 64) {
+      console.error("signing_secret not 64-hex"); process.exit(1);
+    }
+    process.stdout.write(String(d.subscription_id));
+  ') || fail=1
+  echo "  PASS (rate sub id=$RATE_ID, threshold=5/60s/debounce=300s)"
+else
+  echo "  FAIL — expected 201"; cat /tmp/valerts-rate.json; fail=1
+fi
+
+# POST rate_threshold without required fields -> 400
+for BAD_RATE in \
+  '{"webhook_url":"https://example.test/r1","sub_type":"rate_threshold"}' \
+  '{"webhook_url":"https://example.test/r2","sub_type":"rate_threshold","threshold_count":5}' \
+  '{"webhook_url":"https://example.test/r3","sub_type":"rate_threshold","threshold_count":0,"threshold_window_secs":60,"debounce_secs":0}' \
+  '{"webhook_url":"https://example.test/r4","sub_type":"rate_threshold","threshold_count":5,"threshold_window_secs":-1,"debounce_secs":0}'; do
+  rbc=$(curl -s -o /tmp/valerts-rbad.json -w '%{http_code}' -H 'Content-Type: application/json' \
+    -X POST "$URL" --data "$BAD_RATE")
+  if [ "$rbc" = 400 ] && grep -q '"error"' /tmp/valerts-rbad.json; then
+    echo "POST bad rate ($(echo "$BAD_RATE" | cut -c1-60)…): HTTP 400 PASS"
+  else
+    echo "POST bad rate: HTTP $rbc FAIL"; cat /tmp/valerts-rbad.json; fail=1
+  fi
+done
+
+# POST per_event with rate fields -> 400 (mixed combination)
+mc=$(curl -s -o /tmp/valerts-mix.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$URL" \
+  --data '{"webhook_url":"https://example.test/mix","sub_type":"per_event","threshold_count":5,"threshold_window_secs":60,"debounce_secs":0}')
+echo "POST per_event + rate fields: HTTP $mc"
+if [ "$mc" = 400 ] && grep -q '"error"' /tmp/valerts-mix.json; then
+  echo "  PASS"
+else
+  echo "  FAIL"; cat /tmp/valerts-mix.json; fail=1
+fi
+
+# POST sub_type=bogus -> 400
+bsc=$(curl -s -o /tmp/valerts-bsub.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$URL" \
+  --data '{"webhook_url":"https://example.test/bsub","sub_type":"bogus"}')
+echo "POST sub_type=bogus: HTTP $bsc"
+if [ "$bsc" = 400 ] && grep -q '"error"' /tmp/valerts-bsub.json; then
+  echo "  PASS"
+else
+  echo "  FAIL"; cat /tmp/valerts-bsub.json; fail=1
+fi
+
+# GET list includes rate sub with rate fields visible (sub_type/threshold_*)
+if [ -n "$RATE_ID" ]; then
+  rgc=$(curl -s -o /tmp/valerts-rlist.json -w '%{http_code}' "$URL?limit=500")
+  if [ "$rgc" = 200 ]; then
+    node -e "
+      const arr = (require('/tmp/valerts-rlist.json').data) || [];
+      const r = arr.find(s => s.subscription_id === Number($RATE_ID));
+      if (!r) { console.log('  FAIL: rate sub $RATE_ID not in list'); process.exit(1); }
+      if (r.sub_type !== 'rate_threshold') { console.log('  FAIL: sub_type missing/wrong on list'); process.exit(1); }
+      if (r.threshold_count !== 5 || r.threshold_window_secs !== 60 || r.debounce_secs !== 300) {
+        console.log('  FAIL: rate fields not preserved on list'); process.exit(1);
+      }
+      if ('signing_secret' in r) { console.log('  FAIL: signing_secret leak'); process.exit(1); }
+      console.log('  PASS (rate fields visible on GET, no secret leak)');
+    " || fail=1
+  else
+    echo "  FAIL GET after rate POST: HTTP $rgc"; fail=1
+  fi
+fi
 
 # --- GET list -> 200, contains id, NO signing_secret leak ---
 gc=$(curl -s -o /tmp/valerts-list.json -w '%{http_code}' "$URL?limit=500")

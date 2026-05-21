@@ -58,6 +58,72 @@ Response **201**:
 on the field). Persist it on the receiving side immediately — the only
 recovery for a lost secret is to create a new subscription.
 
+#### `sub_type='rate_threshold'` — rate-aggregation mode (S14 / M005)
+
+For the bot-operator persona — per-event alerts are noisy when sporadic
+failures are normal operation. `rate_threshold` fires a single webhook
+only when the matching failure count crosses a configured threshold inside
+a sliding window, then debounces (silences the same sub) for
+`debounce_secs` before the next firing is possible.
+
+Body:
+
+```json
+{
+  "webhook_url":           "https://example.com/bot-alerts",
+  "error_category":        "SLIPPAGE_EXCEEDED",
+  "to_addr":               "0xmybotaddress00000000000000000000000000aa",
+  "sub_type":              "rate_threshold",
+  "threshold_count":       10,
+  "threshold_window_secs": 300,
+  "debounce_secs":         600
+}
+```
+
+- `sub_type` — `"per_event"` (default, S08) or `"rate_threshold"` (S14).
+  Anything else → **400**.
+- `threshold_count` (rate, required) — minimum match count in the window
+  to fire. Must be `> 0`.
+- `threshold_window_secs` (rate, required) — sliding window length in
+  seconds. Must be `> 0`.
+- `debounce_secs` (rate, required) — silence period after a delivery
+  attempt. Must be `>= 0`.
+
+The API rejects mismatched bodies with **400**:
+
+- `sub_type='per_event'` carrying any rate field
+- `sub_type='rate_threshold'` missing any rate field, or a non-positive
+  `threshold_count` / `threshold_window_secs`, or a negative `debounce_secs`
+
+Response **201** is the per-event envelope plus the four rate-mode fields
+(`sub_type`, `threshold_count`, `threshold_window_secs`, `debounce_secs`).
+When the dispatcher fires, the POST body has a different shape — keyed by
+`sub_type` so a single receiver can branch on it:
+
+```json
+{
+  "subscription_id":       42,
+  "sub_type":              "rate_threshold",
+  "match_count":           14,
+  "threshold_count":       10,
+  "threshold_window_secs": 300
+}
+```
+
+The `X-Amarillo-Signature: sha256=<hex>` header and verification flow
+(HMAC-SHA256 of the raw body, keyed by the hex-decoded 32-byte secret)
+are **identical** to per-event — switch on `sub_type` *after* verifying
+the signature.
+
+**Debounce semantics (race-safe, not strictly exactly-once).** Two
+workers may match the same sub in the same instant and *both* fire one
+delivery before either writes its `alert_rate_dispatch` row. From that
+point on the most-recent `dispatched_at` starts the debounce window, so
+permanent duplication is impossible. If your receiver needs strict
+idempotency, dedupe on the `subscription_id + match_count` pair (or the
+delivery timestamp). Self-imposed scope (D018): rate *ratio* / trend
+analytics is a separate slice (S14.1 sketch).
+
 ### Verifying the signature on the receiver
 
 The string in the response is a **64-character lowercase hex** encoding of
