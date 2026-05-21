@@ -1243,6 +1243,34 @@ pub async fn insert_contract_label(
     Ok(())
 }
 
+/// 컨트랙트 라벨을 등록·갱신해 행을 반환한다 (S15 / M005 admin API).
+///
+/// `address` 충돌 시 `label`/`owner_id`를 EXCLUDED 값으로 덮어쓴다(UPSERT).
+/// `insert_contract_label`이 ON CONFLICT DO NOTHING으로 시드 멱등에 쓰이는 반면,
+/// 본 함수는 admin API의 "create or update" 시맨틱을 한 호출에 — 응답에 항상
+/// 행을 돌려준다.
+#[tracing::instrument(skip(pool))]
+pub async fn upsert_contract_label(
+    pool: &PgPool,
+    address: &str,
+    label: &str,
+    owner_id: Option<&str>,
+) -> Result<ContractLabel, DbError> {
+    let row = sqlx::query_as::<_, ContractLabel>(
+        "INSERT INTO contract_label (address, label, owner_id)
+         VALUES (LOWER($1), $2, $3)
+         ON CONFLICT (address) DO UPDATE
+           SET label = EXCLUDED.label, owner_id = EXCLUDED.owner_id
+         RETURNING address, label, owner_id, created_at",
+    )
+    .bind(address)
+    .bind(label)
+    .bind(owner_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
 /// 컨트랙트 라벨을 영구 삭제한다(admin/test 용도). 영향 행 수를 반환한다.
 #[tracing::instrument(skip(pool))]
 pub async fn delete_contract_label(pool: &PgPool, address: &str) -> Result<u64, DbError> {
