@@ -6,6 +6,7 @@ import type {
   Block,
   DailySwapVolume,
   Decimal,
+  DecodedArg,
   DecodedFunction,
   Diagnosis,
   ErrorCategory,
@@ -394,13 +395,47 @@ function parseTraceLog(value: unknown, path: string): TraceLog {
   };
 }
 
+function parseDecodedArg(value: unknown, path: string): DecodedArg {
+  const obj = readRecord(value, path);
+  if (!("value" in obj)) {
+    throw new Error(`Invalid contract at ${path}.value: missing.`);
+  }
+  return {
+    type: readString(obj.type, `${path}.type`),
+    // `value` is intentionally typed as `unknown` — Solidity arg values cross
+    // string / number / boolean / array boundaries, and the parser doesn't
+    // validate per-arg-type shape (D027 — args are best-effort; the caller
+    // discriminates on `type`).
+    value: obj.value,
+  };
+}
+
 function parseDecodedFunction(value: unknown, path: string): DecodedFunction {
   const obj = readRecord(value, path);
+  // S11.1 — `args` must be explicitly present as null or an array.
+  if (!("args" in obj)) {
+    throw new Error(
+      `Invalid contract at ${path}.args: missing (expected null or array).`,
+    );
+  }
+  let args: DecodedArg[] | null;
+  if (obj.args === null) {
+    args = null;
+  } else if (Array.isArray(obj.args)) {
+    args = obj.args.map((a, idx) =>
+      parseDecodedArg(a, `${path}.args[${idx}]`),
+    );
+  } else {
+    throw new Error(
+      `Invalid contract at ${path}.args: expected null or array, got ${typeof obj.args}.`,
+    );
+  }
   return {
     selector: readString(obj.selector, `${path}.selector`),
     name: readString(obj.name, `${path}.name`),
     signature: readString(obj.signature, `${path}.signature`),
     source: readOptionalString(obj.source, `${path}.source`),
+    args,
   };
 }
 
@@ -452,6 +487,19 @@ function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
           obj.failing_function_decoded,
           `${path}.failing_function_decoded`,
         );
+  // S11.1 — root_cause_decoded must be explicitly present (null or object).
+  if (!("root_cause_decoded" in obj)) {
+    throw new Error(
+      `Invalid contract at ${path}.root_cause_decoded: missing (expected null or object).`,
+    );
+  }
+  const root_cause_decoded =
+    obj.root_cause_decoded === null
+      ? null
+      : parseDecodedFunction(
+          obj.root_cause_decoded,
+          `${path}.root_cause_decoded`,
+        );
   // S12 / M004 — same explicit-null contract for diagnosis.
   if (!("diagnosis" in obj)) {
     throw new Error(
@@ -470,6 +518,7 @@ function parseFailedTxDetail(value: unknown, path: string): FailedTxDetail {
     call_tree_truncated: obj.call_tree_truncated,
     root_cause,
     failing_function_decoded,
+    root_cause_decoded,
     diagnosis,
   };
 }

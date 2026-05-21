@@ -47,12 +47,30 @@ export interface TraceLog {
   trace_id: number;
 }
 
-/** S11 — 4-byte selector resolved against the self-owned ABI seed. */
+/** S11.1 — one decoded argument: Solidity type plus JSON-lowered value. */
+export interface DecodedArg {
+  /** Solidity type verbatim from the signature (e.g. "address", "uint256"). */
+  type: string;
+  /**
+   * JSON-lowered value:
+   * - `address` / `bytes` / `bytesN` → `"0x" + hex`
+   * - `uint*` / `int*` → **decimal string** (precision-safe; JSON number
+   *   would lose precision past 2^53)
+   * - `bool` → JSON boolean
+   * - tuple / array → nested JSON array
+   */
+  value: unknown;
+}
+
+/** S11 — 4-byte selector resolved against the self-owned ABI seed.
+ *  S11.1: `args` carries the typed parameter values; `null` is explicit
+ *  ("decoding skipped or failed"; the surrounding object stays useful — D027). */
 export interface DecodedFunction {
   selector: string;
   name: string;
   signature: string;
   source: string | null;
+  args: DecodedArg[] | null;
 }
 
 /** S12 — category-level diagnosis: message + recommended_action. */
@@ -69,8 +87,14 @@ export interface FailedTxDetail {
   call_tree_truncated: boolean;
   /** S10 — first trace frame whose `error` is non-null; explicit null otherwise. */
   root_cause: TraceLog | null;
-  /** S11 — name/signature for `failed.failing_function`; explicit null when unmapped. */
+  /** S11 — name/signature for `failed.failing_function`; explicit null when unmapped.
+   *  S11.1: `args` populated when decoding succeeded against the root frame's input. */
   failing_function_decoded: DecodedFunction | null;
+  /** S11.1 — same shape as `failing_function_decoded`, keyed on `root_cause.input`.
+   *  Useful when the revert originated in a sub-call (e.g. outer `swap` whose
+   *  nested `transfer` reverted). `selector` always equals the first 4 bytes of
+   *  `root_cause.input` (lowercased) when non-null. */
+  root_cause_decoded: DecodedFunction | null;
   /** S12 — message + recommended_action for `failed.error_category`. */
   diagnosis: Diagnosis | null;
 }

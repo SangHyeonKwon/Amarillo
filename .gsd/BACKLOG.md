@@ -11,30 +11,15 @@
 - **사전조건** — 시작 전 필요한 결정·인프라
 - **예상 크기** — 슬라이스 단위 (작 / 중 / 큼)
 
-상태: 미완료 5 / 완료 12 (완료분은 ROADMAP 한 줄 압축).
+상태: 미완료 4 / 완료 13 (완료분은 ROADMAP 한 줄 압축).
 (임계율 알림과 S15 봇 라벨/cookbook은 M005 출하, DNS-time SSRF는 HARDEN3
 단독 PR로 완료, AmarilloClient admin 메서드는 EXAMPLES-ADMIN 단독 PR로 완료,
-**인증 미들웨어는 M006 출하로 완료** — 본 카탈로그에서 인증 항목 제거.
-**toolchain 회귀 lint 정리**(S16에서 인라인 fix)가 별 단위 hardening 후보로 신규 추가.)
+인증 미들웨어는 M006 출하로 완료, **S11.1 ABI args 디코딩**은 별 단독 PR로 완료
+— 본 카탈로그에서 각 항목 제거.)
 
 ---
 
 ## M004 깊이/운영성 잔여
-
-### S11.1 — ABI args 디코딩 + root_cause.input 디코드
-
-S11(name/signature)의 *깊이* 확장. selector 너머의 typed value 추출.
-
-- **가치**: 디버깅 정밀도 ↑ — `transfer(0xabc…, 1000000)` 처럼 함수명 + 타입된
-  인자값 표시. 진단 응답이 한 단계 더 똑똑해짐.
-- **리스크**: med — ABI 타입 시스템(address / uint / dynamic bytes / nested
-  tuple) 디코더 도입. alloy-sol-types 의존 또는 자체 minimal 디코더. D015 정신
-  일관 (자기소유 ABI 시드만).
-- **페르소나**: dApp 개발자 (S11 동일)
-- **사전조건**: ABI 디코더 라이브러리 결정(alloy-sol-types 의존 추가 vs 자체
-  minimal — 무게/유지 보수 트레이드오프).
-- **예상 크기**: 중-큼. 디코더 자체 + 모델 확장(`failing_function_decoded.args`)
-  + 핸들러 + 통합테스트 + 프론트.
 
 ### S12.1 — error_category enum 세분화 v2
 
@@ -122,24 +107,23 @@ FE-WIRE 후속 — 기존 `pool` / `trader` 페이지를 실제 신규 API(`/v1/
 
 ---
 
-## 우선순위 (추천 — M006 출하 후 갱신)
+## 우선순위 (추천 — S11.1 출하 후 갱신)
 
 | # | 항목 | 가치 | 크기 | 페르소나 |
 |---|------|------|------|---------|
-| 1 | S11.1 ABI args 디코딩 | ★★ (진단 깊이) | 중-큼 | dApp 개발자 |
-| 2 | S12.1 enum 세분화 | ★★ (정밀도) | 큼 | dApp 개발자 |
-| 3 | S13.1 패키지 게시 | ★ (운영성) | 작/중 | dApp 개발자 |
-| 4 | OS resolver 캐시 race (hickory-dns) | ★ (잔여 SSRF 갭, 첫 요구 후) | 중 | 보안 운영자 |
-| 5 | 별 단위 hardening (toolchain 회귀 lint) | ☆ (코드 품질) | 작 | 개발자 |
-| 6 | Pools/Traders FE | ☆ (D001 정신) | 작 | 데모 사용자 |
+| 1 | S12.1 enum 세분화 | ★★ (정밀도) | 큼 | dApp 개발자 |
+| 2 | S13.1 패키지 게시 | ★ (운영성) | 작/중 | dApp 개발자 |
+| 3 | OS resolver 캐시 race (hickory-dns) | ★ (잔여 SSRF 갭, 첫 요구 후) | 중 | 보안 운영자 |
+| 4 | 별 단위 hardening (toolchain 회귀 lint) | ☆ (코드 품질) | 작 | 개발자 |
+| 5 | Pools/Traders FE | ☆ (D001 정신) | 작 | 데모 사용자 |
 
 **해석**:
-- M006 마감으로 운영자 페르소나 완결 — 다음 호흡은 *직접 가치 가산*(dApp
-  깊이 / 패키지 게시) 또는 *새 마일스톤 분기*(M007).
-- #1·#2: dApp 개발자 깊이 — *체감 가치 vs 부담*의 균형. 후속 마일스톤 시드.
-- #3·#4: 첫 사용자 명시 요청 후 (D017 / HARDEN3 정신).
-- #5: *언제든 단독 PR* — 작은 hardening, 코드 품질 정신.
-- #6: 영영 안 해도 무방 (D001).
+- S11.1 출하로 M004 잔여 깊이 가산 마감 — dApp 개발자 진단 정밀도 한 단계 ↑.
+- #1·#2: dApp 개발자 정밀도/운영성 — *체감 가치 vs 부담*의 균형. 후속 마일스톤
+  시드.
+- #3: 첫 사용자 명시 요청 후 (HARDEN3 정신).
+- #4: *언제든 단독 PR* — 작은 hardening, 코드 품질 정신.
+- #5: 영영 안 해도 무방 (D001).
 - **M007 분기 후보**(M006 출하로 분기 가능 — GSD-2 원칙 일관): multi-key
   runtime 회전 / 거래소 KYC 매핑 / 자동화된 incident response / RPC 성능
   대시보드. 사용자 결정 시 BACKLOG와 같이 시드.

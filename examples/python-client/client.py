@@ -83,21 +83,53 @@ class TraceLog:
 
 
 @dataclass(frozen=True)
+class DecodedArg:
+    """S11.1 — one decoded argument: Solidity type + JSON-lowered value.
+
+    ``value`` carries whatever JSON sent us — ``str`` for addresses /
+    decimal-encoded integers / ``0x`` hex bytes, ``bool`` for booleans,
+    ``list`` for tuples and arrays. The caller branches on ``type``.
+    """
+
+    type: str
+    value: Any
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DecodedArg":
+        return cls(type=d["type"], value=d["value"])
+
+
+@dataclass(frozen=True)
 class DecodedFunction:
-    """S11 — 4-byte selector resolved against the self-owned ABI seed."""
+    """S11 — 4-byte selector resolved against the self-owned ABI seed.
+
+    S11.1: ``args`` carries the typed parameter values decoded from the
+    call's input bytes. ``None`` is explicit — either decoding wasn't
+    attempted (no input, input shorter than 4 bytes) or it failed (length
+    mismatch, malformed dynamic offsets). The surrounding object stays
+    populated; ``name`` + ``signature`` is still useful diagnostic data on
+    an args miss (D027).
+    """
 
     selector: str
     name: str
     signature: str
     source: Optional[str]
+    args: Optional[List[DecodedArg]]
 
     @classmethod
     def from_dict(cls, d: dict) -> "DecodedFunction":
+        raw_args = d["args"]
         return cls(
             selector=d["selector"],
             name=d["name"],
             signature=d["signature"],
             source=d["source"],
+            args=(
+                [DecodedArg.from_dict(a) for a in raw_args]
+                if raw_args is not None
+                else None
+            ),
         )
 
 
@@ -120,13 +152,14 @@ class Diagnosis:
 
 @dataclass(frozen=True)
 class FailedTxDetail:
-    """``GET /v1/failed-tx/{tx_hash}`` payload (S10 + S11 + S12 cumulative)."""
+    """``GET /v1/failed-tx/{tx_hash}`` payload (S10 + S11 + S11.1 + S12 cumulative)."""
 
     failed: FailedTransaction
     call_tree: List[TraceLog]
     call_tree_truncated: bool
     root_cause: Optional[TraceLog]
     failing_function_decoded: Optional[DecodedFunction]
+    root_cause_decoded: Optional[DecodedFunction]
     diagnosis: Optional[Diagnosis]
 
     @classmethod
@@ -143,6 +176,11 @@ class FailedTxDetail:
             failing_function_decoded=(
                 DecodedFunction.from_dict(d["failing_function_decoded"])
                 if d["failing_function_decoded"] is not None
+                else None
+            ),
+            root_cause_decoded=(
+                DecodedFunction.from_dict(d["root_cause_decoded"])
+                if d["root_cause_decoded"] is not None
                 else None
             ),
             diagnosis=(

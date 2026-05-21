@@ -191,7 +191,11 @@ table into a human-readable shape:
   "selector":  "0xa9059cbb",               // always lowercased
   "name":      "transfer",
   "signature": "transfer(address,uint256)",
-  "source":    "erc20"                     // 'erc20' | 'uniswap-v3-router' | ...
+  "source":    "erc20",                    // 'erc20' | 'uniswap-v3-router' | ...
+  "args": [                                // S11.1 — null if input absent / decode failed
+    { "type": "address", "value": "0xabc0000000000000000000000000000000000def" },
+    { "type": "uint256", "value": "1000000000000000000" }
+  ]
 }
 ```
 
@@ -200,6 +204,59 @@ table into a human-readable shape:
 
 - `selector === data.failed.failing_function.toLowerCase()` (self-consistency).
 - `name` and `signature` are non-empty strings.
+- `args` is `null` *or* an array of `{type, value}`; never absent.
+
+### ABI args decoding (S11.1)
+
+`args` is the typed view of the input bytes — built by walking the call's
+top-level types from `signature` against the same input that the failing
+call broadcast on-chain (the root frame's `input`). Each element carries:
+
+- `type` — Solidity type string verbatim from `signature` (e.g. `"address"`,
+  `"uint256"`, `"(address,uint24,uint256)"` for a nested tuple).
+- `value` — lowered to JSON:
+  - `address` → `"0x" + 40-hex` (lowercased).
+  - `uint{N}` / `int{N}` → **decimal string** (JSON `number` only safely
+    holds integers up to 2^53; `uint256` would silently lose precision in
+    any JS/TS client otherwise).
+  - `bool` → JSON boolean.
+  - `bytes` / `bytesN` → `"0x" + hex`.
+  - `string` → JSON string.
+  - tuple / fixed-array / dynamic array → JSON array (recursive).
+
+`args` is `null` whenever decoding *didn't happen* (the root frame has no
+`input`, or the input is shorter than 4 bytes) or *failed* (input length
+mismatch against `signature`, malformed dynamic offsets, etc.). The
+surrounding `DecodedFunction` stays populated — `name` + `signature` is
+still useful diagnostic data; we don't collapse it on an args miss (D027).
+
+Param names are not surfaced — our seeded signatures are anonymous (e.g.
+`transfer(address,uint256)`) and adding a field that is *always* `null`
+would be misleading (D004/D014 silent-default rejection).
+
+### `root_cause_decoded` (S11.1)
+
+A second `DecodedFunction` keyed on `root_cause.input` instead of the
+transaction's top-level call. Shape identical to `failing_function_decoded`.
+Useful when the revert originated inside a sub-call whose function is
+different from the top-level — e.g. a `swap` whose nested `transfer`
+reverted will show `failing_function_decoded.name === "swap"` and
+`root_cause_decoded.name === "transfer"`.
+
+```jsonc
+"root_cause_decoded": {                    // S11.1 — null if root_cause/input absent or unseeded
+  "selector":  "0x095ea7b3",
+  "name":      "approve",
+  "signature": "approve(address,uint256)",
+  "source":    "erc20",
+  "args":      [ /* ... */ ]
+}
+```
+
+Self-consistency: `root_cause_decoded.selector` always equals the first
+four bytes of `root_cause.input` (lowercased). `null` covers three
+distinct cases: `root_cause` itself is `null`, `root_cause.input` is `null`,
+or the selector isn't in our seed.
 
 Why self-owned ABI seed and not 4byte.directory? Two reasons (D015, D008
 spirit):
@@ -211,11 +268,10 @@ spirit):
    and the Uniswap V3 ABI; an operator extending the seed is a deliberate
    `INSERT INTO function_signature ... ON CONFLICT DO NOTHING`.
 
-ABI **args** decoding (turning the input bytes into typed values) is
-deliberately *out of scope* for this slice — that's a separate slice (S11.1
-sketch) because it needs the full ABI type system (address / uint / dynamic
-bytes / nested tuples). Name + signature alone is already the high-value
-gain for the dApp developer persona.
+Library choice for `args`: **alloy-sol-types** via `DynSolType::parse` (the
+same `alloy` workspace dep the indexer already uses for RPC). Zero new
+dependencies; full Solidity type system including nested tuples covered
+out of the box (D025).
 
 `diagnosis` answers "*why* did it fail, and what should I do about it?" by
 joining `data.failed.error_category` against the self-owned

@@ -482,3 +482,107 @@
     시뮬 부담; 컴파일 단언 + 코드 리뷰로 1차 보장).
   - 라이브 401 응답 시 메시지 변환은 `describeError` 단위테스트 추가 가능 —
     본 슬라이스 스코프에는 미포함 (마찰 ↓, 추후 후속).
+
+## D025 — S11.1 ABI 디코더: alloy-sol-types (이미 워크스페이스 의존)
+
+- **결정**: ABI args 디코딩은 **alloy의 `dyn_abi`(`DynSolType::parse` +
+  `abi_decode_params`)**로 구현. alloy `[full]` features는 인덱서 RPC용으로
+  이미 워크스페이스에 들어와 있으므로 **신규 의존 0**. 자체 minimal 디코더
+  대안은 거부.
+- **이유**:
+  - 우리 시드 17개 함수 시그니처에 *nested tuple*이 포함됨
+    (`exactInputSingle((address,address,uint24,address,uint256,uint256,
+    uint256,uint160))`). tuple/dynamic bytes/nested array를 직접 구현하면
+    한 슬라이스 분량 이상 + 시드 확장 시마다 corner case 부담.
+  - alloy는 이미 인덱서 RPC 클라이언트가 `[full]`로 들어와 있어 D008/D015
+    "외부 의존 미도입" 정신 위반 X — *이미 사용 중인 의존*의 모듈만 활용.
+  - `DynSolType::parse(&format!("({types})"))` 한 줄로 `function_signature.
+    signature` 컬럼에 저장된 canonical Solidity signature를 runtime 파싱.
+- **스코프**: `crates/decoder/src/abi.rs` 신설 — `decode_args(signature: &str,
+  input_hex: &str) -> Result<Vec<DecodedArg>, AbiDecodeError>`. selector
+  (첫 4바이트)는 스킵, args bytes를 tuple 타입으로 wrap해 디코드 후 결과
+  Tuple을 flat Vec으로 unwrap. 단위테스트 9 (전체 정상 3 + 에러 분기 4 +
+  helper split/extract 2).
+- **트레이드오프**:
+  - alloy 자체는 무거운 의존이지만 *이미 인덱서가 도입*. 본 슬라이스가 그
+    무게를 *가산하지 않음*. decoder crate에 `alloy.workspace = true`가 이미
+    있어 신규 cargo 의존 추가 0.
+  - `DynSolType::parse_seq`가 alloy 1.x에서 더 이상 노출되지 않음 — 단일
+    `DynSolType::parse` + tuple wrap 패턴으로 우회.
+  - serde 의존 추가 1건 (decoder crate에 `serde.workspace = true`) — `DecodedArg`
+    Serialize derive에 필요. 이미 workspace deps에 있던 것을 decoder crate에
+    *재선언*하는 수준.
+- **검증 제약(D009~D024 일관)**: decoder 단위테스트(통과 27/27, 신규 9 +
+  기존 18) + verify HTTP 의미 단언(args/root_cause_decoded shape +
+  자기일관성). 라이브 메인넷 자동 회귀 부재 — docker compose 시드의 GOOD tx가
+  실제로 ABI 디코드를 트리거하는지는 시드 데이터에 달림.
+
+## D026 — S11.1 응답 모델: `DecodedArg { type, value }` (Vec, 순서 보존)
+
+- **결정**: `DecodedFunction.args: Option<Vec<DecodedArg>>` 가산. 각 원소는
+  `DecodedArg { type: String, value: serde_json::Value }`. 순서 보존 (Vec),
+  type 명시, value는 JSON Value (address/bytes는 `0x` hex string, uint*/int*
+  는 decimal string [precision 보존], bool은 boolean, tuple/array는 nested
+  array). param `name`은 *미포함* (시드 시그니처가 익명 형태 — 항상 null이면
+  silent default 정신 위반).
+- **이유**:
+  - 순서 = Solidity 호출 규약. positional 인자라 Map<name, value>는 *순서
+    유실*. Vec이 자연.
+  - type 명시는 *클라이언트 분기*에 필수 — uint256 decimal string과 bytes
+    `0x` hex string은 *둘 다 JSON string*이라 type 없이 구분 불가.
+  - uint256 decimal string은 *precision-safe* — JSON number는 `2^53` 초과
+    시 silent 정밀도 손실. *모든 정수형*은 string으로 통일 (uint8도 동일
+    — 일관성).
+  - param name은 시드 시그니처(`transfer(address,uint256)`)에 없음. 미래에
+    `transfer(address recipient, uint256 amount)` 형태로 시드 확장 시 추가
+    가능 — 그때 별 슬라이스로 가산.
+- **스코프**:
+  - `decoder::abi::DecodedArg` 정의 (serde Serialize derive)
+  - `db` crate에서 `pub use decoder::abi;`로 re-export — api 핸들러는 `db::
+    abi::decode_args` 호출 (의존 그래프 단순)
+  - `DecodedFunction { selector, name, signature, source, args: Option<Vec<
+    DecodedArg>> }` — args 가산, `From<FunctionSignature>` 변환은 `args: None`
+    기본
+- **트레이드오프**:
+  - `value`의 다형성 — JSON Value (string|bool|array). 클라이언트가 `type`
+    필드를 보고 분기 필요. alternative (`value: string` 통일)는 *정보 손실*
+    (bool, tuple shape 의미 X).
+  - param name 미포함 → "왜 args[0] / args[1]인지" 운영자 추적 불편. 시그니처
+    표시(`signature: "transfer(address,uint256)"`)와 함께 보면 *positional
+    추론 가능* — 마찰 ↓, 시드 미충분 → null 정신 일관.
+- **검증 제약(D009~D025 일관)**: web parser 단위테스트(args 정상/null/missing
+  throw), verify HTTP 의미 단언(각 원소 `{type, value}` shape), examples
+  (TS/Python) wire type 가산 + tsc/py_compile.
+
+## D027 — S11.1 디코드 실패 시맨틱: args=null, 객체 자체는 살림
+
+- **결정**: ABI args 디코드가 *시도하지 않음*(input 누락, 4바이트 미만)
+  또는 *실패*(인자 수 불일치, hex 디코딩 실패, ABI decode 오류)인 경우
+  `DecodedFunction.args = None`로 설정. **`DecodedFunction` 객체 자체는
+  `null`로 만들지 않음** — selector lookup 성공 정보(name + signature +
+  source)는 *여전히 사용자에게 유용*.
+- **이유**:
+  - selector lookup과 args 디코드는 *독립적 단계* — selector가 시드 매칭
+    되면 name/signature는 *항상* 알 수 있음. args만 실패한 경우에도 사용자가
+    함수명을 보는 가치 > 전체 객체 무효화.
+  - `null` args는 *silent fallback*이 아니라 *명시 신호* (D014 일관) — 클라
+    이언트가 "args 없음"을 명시적으로 처리.
+  - 핸들러는 디코드 실패를 `tracing::debug!`로 로깅 (운영자 진단용) — 응답
+    body엔 *최소 정보*만 (D021 info-leak 방지 정신 연장).
+- **스코프**:
+  - `crates/api/src/routes/failed_tx.rs`: `decode_args(...)` 결과를 `Ok(args)
+    => decoded.args = Some(args), Err(e) => tracing::debug!(...)` 패턴으로
+    처리
+  - `failing_function_decoded`와 `root_cause_decoded` 모두 동일 패턴 — 두
+    객체가 *각자 독립적*으로 args 디코드 시도
+- **트레이드오프**:
+  - 디코드 실패의 *이유*를 응답에서 알기 어려움 — `args_decode_error`
+    필드를 가산하는 옵션도 있으나 *응답 표면 가산* + *서버 내부 정보 노출*
+    (D021 spirit 위반 위험). 디버깅 필요 시 *서버 로그 검사*.
+  - 시드 매칭 실패와 args 디코드 실패의 *시각 구분*: 시드 매칭 실패 →
+    `DecodedFunction` 자체가 `null`. 시드 매칭 성공 + args 실패 → `DecodedFunction`
+    객체 + `args: null`. 클라이언트가 두 케이스를 *명확히 구분*.
+- **검증 제약(D009~D026 일관)**: web parser가 missing args key를 *throw*
+  (silent default 차단). verify HTTP가 `args` 필드의 *존재*를 단언
+  (`hasOwnProperty`). 라이브 디코드 실패 케이스는 *시드/입력 데이터 의존*
+  — 자동 시뮬 어렵고 *수동 스모크*로 위임.

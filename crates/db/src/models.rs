@@ -455,8 +455,16 @@ pub struct FailedTxDetail {
     /// `failed.failing_function` selector를 자기소유 ABI 시드(`function_signature`)
     /// 와 lookup해 사람이 읽는 함수명/시그니처로 가산 (S11 / M004). 매칭이 없거나
     /// `failing_function` 자체가 `None`이면 `null` (silent default 금지 — D015/D014).
-    /// args 디코딩은 별 슬라이스(S11.1 sketch).
+    /// S11.1: `args`까지 디코드 — `call_tree` root frame(`call_depth = 0`)의 input
+    /// bytes를 signature와 함께 ABI 디코드.
     pub failing_function_decoded: Option<DecodedFunction>,
+    /// `root_cause` frame의 `input` bytes를 자기소유 ABI 시드로 디코드 (S11.1).
+    /// 첫 4바이트(selector) lookup → `DecodedFunction` 합성 + 나머지 args 디코드.
+    /// `root_cause`가 `null`, `input`이 `null`, selector 시드 미존재 모두 명시
+    /// `null` (silent default 금지 — D027/D014). 정직히: 실패 frame이 *서로 다른*
+    /// 함수를 호출했을 때(예: top-level은 `swap`, revert는 내부 `transfer`)에
+    /// 가장 유용 — `failing_function_decoded`와 *다를 수 있다*.
+    pub root_cause_decoded: Option<DecodedFunction>,
     /// `failed.error_category` wire form으로 `category_diagnosis` 시드 lookup
     /// 결과 — 사람이 읽는 진단 메시지 + 추천 액션 (S12 / M004). 시드되지 않은
     /// 카테고리는 `null` (silent default 금지 — D016/D014). enum 자체 세분화는
@@ -644,12 +652,20 @@ pub struct FunctionSignature {
 /// `failing_function`(4-byte selector) lookup 성공 시 [`FunctionSignature`]에서
 /// 발췌(생성 시각 등 내부 컬럼 제외). 매칭 없음은 `None` (silent default 금지;
 /// S10/D014 일관).
+///
+/// S11.1: `args`는 input bytes를 signature와 함께 ABI 디코드한 결과 — *시도하지
+/// 않음/실패* 모두 `None` (D027). 정직히: name/signature는 lookup만으로도 박히지만
+/// args는 input이 있어야 하고 디코드도 성공해야 채워짐.
 #[derive(Debug, Clone, Serialize)]
 pub struct DecodedFunction {
     pub selector: String,
     pub name: String,
     pub signature: String,
     pub source: Option<String>,
+    /// S11.1 — 타입된 인자값(`Option<Vec<DecodedArg>>`). `None`은 *디코드 시도하지
+    /// 않음 또는 실패* (D027). 클라이언트는 `null`을 *조용히 fallback*이 아닌
+    /// *명시 신호*로 해석해야 함.
+    pub args: Option<Vec<decoder::abi::DecodedArg>>,
 }
 
 impl From<FunctionSignature> for DecodedFunction {
@@ -659,6 +675,7 @@ impl From<FunctionSignature> for DecodedFunction {
             name: fs.name,
             signature: fs.signature,
             source: fs.source,
+            args: None,
         }
     }
 }

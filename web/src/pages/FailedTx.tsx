@@ -23,6 +23,8 @@ import {
   useFailedTxTimeseries,
 } from "@/api/hooks";
 import {
+  type DecodedArg,
+  type DecodedFunction,
   ERROR_CATEGORIES,
   type ErrorCategory,
   type FailedTransaction,
@@ -59,6 +61,91 @@ const WINDOW_FILTERS = ["7", "30", "90", "365", "all"] as const;
 
 /** Per-cycle page size for the failed-tx list (S04 hardening: receiver-capped). */
 const LIST_LIMIT = 20;
+
+/**
+ * Stringify a {@link DecodedArg.value} for inline display. Strings pass
+ * through unchanged (addresses / decimal-string integers / `0x…` bytes),
+ * tuples and arrays render as JSON. Truncation happens at the CSS layer
+ * (`text-overflow: ellipsis`), not here — clients copying the value need
+ * the full string.
+ */
+function formatArgValue(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (typeof v === "string") return v;
+  if (typeof v === "boolean") return String(v);
+  return JSON.stringify(v);
+}
+
+/**
+ * Render a `DecodedFunction.args` array inline (S11.1). `null` collapses
+ * to a small "args not decoded" hint so the reader doesn't mistake the
+ * surrounding `DecodedFunction` for malformed data (D027 — name +
+ * signature still useful on an args miss).
+ */
+function DecodedArgsList({ args }: { args: DecodedArg[] | null }) {
+  if (args === null) {
+    return (
+      <span className="muted" style={{ fontSize: 11 }}>
+        args not decoded
+      </span>
+    );
+  }
+  if (args.length === 0) {
+    return (
+      <span className="muted" style={{ fontSize: 11 }}>
+        (no args)
+      </span>
+    );
+  }
+  return (
+    <ul
+      style={{
+        listStyle: "none",
+        margin: 0,
+        padding: 0,
+        fontSize: 11,
+        lineHeight: 1.6,
+      }}
+    >
+      {args.map((a, i) => (
+        <li key={i} style={{ display: "flex", gap: 8, alignItems: "baseline" }}>
+          <span className="muted" style={{ flex: "0 0 auto" }}>
+            {a.type}
+          </span>
+          <span
+            className="mono"
+            style={{
+              flex: "1 1 auto",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+            title={formatArgValue(a.value)}
+          >
+            {formatArgValue(a.value)}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * One-line summary of a {@link DecodedFunction} for inline placement —
+ * `name(typed-args)` style, truncated by the surrounding container. Falls
+ * back to the bare selector when decode lookup failed.
+ */
+function DecodedFunctionLabel({ fn }: { fn: DecodedFunction }) {
+  return (
+    <span>
+      <span style={{ fontWeight: 600 }}>{fn.name}</span>
+      <span className="muted" style={{ fontSize: 11 }}>
+        {" "}
+        {fn.signature}
+      </span>
+    </span>
+  );
+}
 
 const columns: Column<FailedTxAnalysis>[] = [
   {
@@ -787,6 +874,24 @@ export function FailedTx() {
                       call_tree truncated (S04 cap hit) — tail dropped
                     </div>
                   )}
+                  {detail.failing_function_decoded && (
+                    <div
+                      style={{
+                        marginTop: 12,
+                        padding: 10,
+                        borderLeft: "3px solid #3ECF8E",
+                        background: "rgba(62,207,142,0.06)",
+                        fontSize: 12,
+                      }}
+                    >
+                      <div className="card-sub" style={{ marginBottom: 6 }}>
+                        Decoded args (S11.1) — top-level call typed values
+                      </div>
+                      <DecodedArgsList
+                        args={detail.failing_function_decoded.args}
+                      />
+                    </div>
+                  )}
                   {detail.root_cause ? (
                     <div
                       style={{
@@ -834,6 +939,28 @@ export function FailedTx() {
                           err: {detail.root_cause.error}
                         </div>
                       </div>
+                      {detail.root_cause_decoded && (
+                        <div
+                          style={{
+                            marginTop: 8,
+                            paddingTop: 8,
+                            borderTop: "1px solid rgba(255,255,255,0.06)",
+                            fontSize: 12,
+                          }}
+                        >
+                          <div className="card-sub" style={{ marginBottom: 4 }}>
+                            Decoded (S11.1)
+                          </div>
+                          <DecodedFunctionLabel
+                            fn={detail.root_cause_decoded}
+                          />
+                          <div style={{ marginTop: 6 }}>
+                            <DecodedArgsList
+                              args={detail.root_cause_decoded.args}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div

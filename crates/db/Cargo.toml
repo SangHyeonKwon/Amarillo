@@ -17,6 +17,9 @@ bigdecimal.workspace = true
 chrono.workspace = true
 tokio.workspace = true
 
+# S11.1 — DecodedFunction.args가 decoder::abi::DecodedArg를 호스팅.
+decoder = { path = "../decoder" }
+
 [dev-dependencies]
 # Integration tests live in their own crate and do not inherit the normal
 # deps above, so the runtime + time types must be declared here too.

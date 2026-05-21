@@ -52,7 +52,27 @@ Response (S10/S11/S12 additive on top of the M001 base):
     "call_tree": [ /* … pre-order DFS, trace_id ASC */ ],
     "call_tree_truncated": false,
     "root_cause":               { "trace_id": 16, "error": "Too little received", "call_depth": 2, /* … */ },
-    "failing_function_decoded": { "selector": "0xa9059cbb", "name": "transfer", "signature": "transfer(address,uint256)", "source": "erc20" },
+    "failing_function_decoded": {
+      "selector":  "0xa9059cbb",
+      "name":      "transfer",
+      "signature": "transfer(address,uint256)",
+      "source":    "erc20",
+      // S11.1 — typed args. `uint256` is a decimal *string* (precision-safe).
+      "args": [
+        { "type": "address", "value": "0xabc0000000000000000000000000000000000def" },
+        { "type": "uint256", "value": "1000000000000000000" }
+      ]
+    },
+    // S11.1 — `root_cause.input` decoded the same way. Useful when the revert
+    // originated in a sub-call whose function differs from the top-level
+    // (e.g. outer `swap` whose nested `transfer` reverted).
+    "root_cause_decoded": {
+      "selector":  "0x095ea7b3",
+      "name":      "approve",
+      "signature": "approve(address,uint256)",
+      "source":    "erc20",
+      "args":      [ /* … same shape as above */ ]
+    },
     "diagnosis":                { "message": "…", "recommended_action": "…", "source": "builtin" }
   }
 }
@@ -60,7 +80,11 @@ Response (S10/S11/S12 additive on top of the M001 base):
 
 `null` is **always explicit**, never silently absent — D014 / D016. The
 backend won't drop a field; if it's not seeded / not applicable, you get
-`null` and decide how to handle it.
+`null` and decide how to handle it. `args` follows the same rule: `null`
+means decoding wasn't attempted (no input bytes) or failed; the surrounding
+`DecodedFunction` stays populated (D027). For `uint*` / `int*`, values
+arrive as **decimal strings** so `uint256` round-trips through JS without
+losing precision past 2^53.
 
 ### TypeScript
 
