@@ -99,7 +99,15 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
     + verify DIAG semantics(시드된 카테고리는 non-null 의미 단언) + 프론트 강조 블록.
     **D016** (스코프: 메시지+액션, enum 세분화는 S12.1).
 - [ ] **S12.1 — error_category enum 세분화 (v2)** `[sketch]` `[edge: weak-spot]`
-- [ ] **S13 — 개발자 SDK/문서** `[sketch]` — TS/Python 미니멈 클라이언트 + cookbook (프로덕트화)
+- [x] **S13 — 개발자 예시 클라이언트(TS+Python) + cookbook** `[edge: weak-spot]` · risk: low · **DONE** → S13-SUMMARY.md
+  - `examples/typescript-client/` (fetch + node:crypto, 외부 의존 0, ambient.d.ts로
+    npm 무도입) — `AmarilloClient` 전 엔드포인트 + `verifyAlertSignature` + 3 시나리오
+  - `examples/python-client/` (urllib + hmac stdlib, 외부 의존 0) — 동일 3 시나리오
+  - `docs/cookbook.md` — 3 시나리오에 curl + TS + Python 3중 예시 + "M004 in one paragraph"
+  - README.md 갱신 — Failure Intelligence API 표 확장 + "Client examples & cookbook" 신설
+  - **D017** (예시 = SDK 동일, 게시는 S13.1)
+  - **M004 acceptance 완성** — SHIPPED 선언 여부는 사용자 결정 대기
+- [ ] **S13.1 — SDK 패키지화(npm/PyPI 게시)** `[sketch]` (D017)
 
 ---
 

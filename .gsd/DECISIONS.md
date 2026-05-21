@@ -224,3 +224,29 @@
   (`diagnosis` 필드 존재 + null|object + 시드된 카테고리에 대한 의미 단언) +
   clippy/fmt + web typecheck/test/build. 라이브 메인넷 자동 회귀 부재 — 자기
   시드 카테고리로 의미 단언.
+
+## D017 — S13 스코프: 예시 클라이언트(TS+Python) + cookbook까지, 패키지 게시는 별 단위
+- **결정**: S13(개발자 SDK/문서)의 1차 스코프는 **TypeScript + Python 미니멈
+  *예시 클라이언트* 코드 + cookbook 문서**까지. 두 언어 모두 외부 런타임 의존 0
+  (TS는 `fetch`, Python은 `urllib.request`). `examples/typescript-client/` +
+  `examples/python-client/` 자기-완결 1~2 파일. npm / PyPI 게시는 본 슬라이스
+  스코프 밖 — 별 단위(`S13.1` sketch). `package.json` / `pyproject.toml`도 도입
+  안 함(빌드/배포 인프라 그 자체로 한 유닛 이상; D008 정신).
+- **이유**: dApp 개발자 페르소나(D014)에게 *즉시 카피해 쓰는* 작동 예시가 가장
+  큰 가치 — npm install 절차 없이 1 파일을 자기 프로젝트에 붙이면 동작. 우리
+  API의 응답 계약(S10/S11/S12 가산 누적)이 *복사 가능한 코드*로 시연되면 그
+  자체가 가장 좋은 문서. 게시 단계의 무게(semver / 게시 토큰 / CI / 종속 그래프
+  관리)는 첫 사용자가 실제로 npm 게시를 요청하기 전에는 *낭비*.
+- **스코프**: D003 동결 유지. cookbook 문서 `docs/cookbook.md` 하나에 3 시나리오:
+  (1) 단건 진단 (`/v1/failed-tx/{tx_hash}` 응답에서 root_cause / decoded /
+  diagnosis 활용), (2) 알림 구독 (`POST /v1/alert-subscriptions` + HMAC 검증),
+  (3) 라벨된 컨트랙트 실패 분포 (`/v1/analytics/failed-tx/by-label`). 각 시나리오
+  마다 curl + TS + Python 3중 예시.
+- **트레이드오프**: 예시 코드는 사용자가 직접 카피해야 — "그냥 `npm install ...`
+  되면 좋겠다"는 욕구는 S13.1로 미룬다. 단, 코드가 외부 의존 0이라서 *카피
+  자체로 작동*한다(예시 코드 = SDK = 동일).
+- **검증 제약(D009~D016 일관)**: clippy/fmt 무회귀 + web typecheck/test/build
+  무회귀 (예시 코드는 web 빌드 안 들어감 — 별 디렉토리). 예시 코드는 *컴파일
+  검증*까지(TS는 `tsc --noEmit`로 typecheck, Python은 `python -m py_compile`로
+  syntax check). 라이브 호출은 docker compose + verify 스크립트와 동일 환경
+  요구라 본 슬라이스에서는 syntax/type 검증까지 + 수동 스모크 절차 문서화.
