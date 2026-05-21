@@ -277,3 +277,30 @@
 - **검증 제약(D009~D017 일관)**: 통합 PG(매칭/디바운스 쿼리) + verify HTTP(rate
   sub 생성 + 발송 시뮬레이션) + clippy/fmt + web typecheck/test/build. 라이브
   임계율 시뮬은 시드 데이터의 실패 tx 시간 분포 기반 — 자동 검증 가능.
+
+## D019 — S15 스코프: 봇 라벨 admin API + cookbook 봇 시나리오 (M005 마감)
+- **결정**: S15 = M005 마감 슬라이스. **봇 라벨 admin API**(`POST /v1/contract-
+  labels` + `DELETE /v1/contract-labels/{address}`) + **cookbook 봇 운영자 시나리오**
+  (S16 흡수). 별도 `bot_label` 테이블 신설 *없이* 기존 `contract_label` 인프라
+  재사용(S09) — owner_id 필터로 자기 봇 분리. 인증 미부착(D008 정신 일관 — 인증
+  도입은 별 단위 이상).
+- **이유**: M005 첫 슬라이스 S14가 rate 알림 메커니즘을 박았지만, 봇 운영자가
+  *자기 봇 라벨을 동적으로 등록*하는 표면이 없으면 라벨이 *시드 데이터로만*
+  존재. 진짜 *프로덕트* 흐름(라벨 등록 → rate sub 생성 → 알림 → by-label로
+  자기 봇 실패 분포)이 코드로 박혀야 봇 운영자 페르소나가 완결. cookbook
+  시나리오 4는 S13 패턴 일관(S08+S09+M004 통합 시나리오 → 본 슬라이스에서
+  S14+S15+M005 봇 시나리오 추가).
+- **스코프**:
+  - 신규 테이블 X — `contract_label`(S09) 재사용. `insert_contract_label`/
+    `delete_contract_label` 쿼리도 이미 존재(S09-T01). API 핸들러만 추가.
+  - 인증 X — 데모 스코프 명시(D008/D013 정신). 운영 배포 시 별 단위.
+  - 봇 라벨 *시드* 추가 X — 운영자가 admin API로 동적 등록 (또는 시드 SQL).
+  - 프론트 폼 추가 X — 봇 운영자는 CLI/스크립트 사용자, dApp 개발자용 UI(FailedTx
+    페이지의 by-label 카드)는 이미 있음.
+- **트레이드오프**:
+  - 인증 미부착 = 데모만, 운영 위험. 명시 + S15.1 (선택) 인증 도입은 별 슬라이스.
+  - bot_label 별 테이블 분리하지 않음 — *모든 라벨이 같은 테이블*. 봇/컨트랙트
+    구분은 owner_id로(공개 라벨 = NULL, 봇 운영자 = 자기 ID).
+- **검증 제약(D009~D018 일관)**: 통합 PG(insert/delete 라운드트립) + verify HTTP
+  (POST 201 / DELETE 204·404 / 잘못된 주소 400) + cookbook 4 시나리오 자동
+  검증 어려움 → 라이브 호출은 docker compose + 수동 스모크(README/cookbook 명시).

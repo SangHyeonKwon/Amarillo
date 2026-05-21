@@ -94,8 +94,14 @@ M005는 새 페르소나 진입 — *건별* 알림(S08)은 봇 운영자에게 
 - `scripts/verify-alerts.sh`에 rate sub 시드 + 의미 단언 추가, 프론트 `/alerts`
   페이지에 rate 설정 폼 + rate 모드 시각화.
 
-**S15 — 봇 라벨(자기 봇 식별)** `[sketch]` — S09 contract_label 확장 또는 별 테이블.
-**S16 — 봇 운영자 cookbook 시나리오** `[sketch]` — docs/cookbook.md에 봇 시나리오 추가.
+**S15 — 봇 라벨 admin API + 봇 운영자 cookbook (M005 마감 슬라이스)** 수용 기준:
+- `POST /v1/contract-labels {address, label, owner_id?}` → 201로 라벨 등록.
+  잘못된 주소(0x+40hex 아님) → 400. 인증 미부착(D008/D019 데모 스코프).
+- `DELETE /v1/contract-labels/{address}` → 미존재면 404, 존재면 204 (멱등).
+- `docs/cookbook.md`에 시나리오 4 추가: "봇 운영자 흐름" — 라벨 등록 → rate sub
+  생성(자기 봇 to_addr) → 발송 → by-label로 자기 봇 실패 분포 확인. curl + TS + Python.
+- `scripts/verify-failed-tx-by-label.sh`에 POST/DELETE round-trip 단언 추가.
+- (S16 흡수 — 별 슬라이스 미생성, M005 마감 묶음.)
 
 ## 공통 비기능 요건
 
