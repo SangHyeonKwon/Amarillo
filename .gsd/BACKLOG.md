@@ -11,9 +11,10 @@
 - **사전조건** — 시작 전 필요한 결정·인프라
 - **예상 크기** — 슬라이스 단위 (작 / 중 / 큼)
 
-상태: 미완료 6 / 완료 9 (완료분은 ROADMAP 한 줄 압축).
-(임계율 알림과 S15 봇 라벨/cookbook은 M005 출하로 완료, DNS-time SSRF는
-HARDEN3 단독 PR로 완료 — 본 카탈로그에서 제거.)
+상태: 미완료 5 / 완료 10 (완료분은 ROADMAP 한 줄 압축).
+(임계율 알림과 S15 봇 라벨/cookbook은 M005 출하, DNS-time SSRF는 HARDEN3
+단독 PR로 완료, AmarilloClient admin 메서드는 EXAMPLES-ADMIN 단독 PR로 완료
+— 본 카탈로그에서 모두 제거.)
 
 ---
 
@@ -59,24 +60,6 @@ S13의 *운영성* 확장 — 카피 가능 examples → 정식 패키지.
 - **페르소나**: dApp 개발자 (S13 동일)
 - **사전조건**: npm / PyPI 계정 + 게시 토큰 + (선택) GitHub Actions 게시 워크플로.
 - **예상 크기**: 작(코드 분리) / 중(운영 셋업).
-
----
-
-## M005 후속
-
-### AmarilloClient admin 메서드 추가 (S15 후속)
-
-`examples/typescript-client/client.ts` + `examples/python-client/client.py` 에
-`createContractLabel` / `deleteContractLabel` 메서드 추가. cookbook 4번째
-시나리오의 step 1을 TS/Python에서도 직접 호출 가능하게.
-
-- **가치**: 작 — cookbook이 이미 curl로 시연. examples 클라가 완전체가 되는
-  완결성.
-- **리스크**: 작 — 패턴 명확 (기존 alert/by-label 메서드와 동일). typecheck/
-  py_compile만 갱신.
-- **페르소나**: 봇 운영자 (S15 동일)
-- **사전조건**: 없음.
-- **예상 크기**: 작 (≈ 30분).
 
 ---
 
@@ -133,25 +116,23 @@ FE-WIRE 후속 — 기존 `pool` / `trader` 페이지를 실제 신규 API(`/v1/
 
 ---
 
-## 우선순위 (추천 — HARDEN3 출하 후 갱신)
+## 우선순위 (추천 — EXAMPLES-ADMIN 출하 후 갱신)
 
 | # | 항목 | 가치 | 크기 | 페르소나 |
 |---|------|------|------|---------|
-| 1 | AmarilloClient admin 메서드 (S15 후속) | ★★ (M005 완결성 마감) | 작 | 봇 운영자 |
-| 2 | 인증 미들웨어 도입 | ★★★ (운영 필수) | 큼 (별 마일스톤) | 운영자 |
-| 3 | S11.1 ABI args 디코딩 | ★★ (진단 깊이) | 중-큼 | dApp 개발자 |
-| 4 | S12.1 enum 세분화 | ★★ (정밀도) | 큼 | dApp 개발자 |
-| 5 | S13.1 패키지 게시 | ★ (운영성) | 작/중 | dApp 개발자 |
-| 6 | OS resolver 캐시 race (hickory-dns) | ★ (잔여 SSRF 갭, 첫 요구 후) | 중 | 보안 운영자 |
-| 7 | Pools/Traders FE | ☆ (D001 정신) | 작 | 데모 사용자 |
+| 1 | 인증 미들웨어 도입 | ★★★ (운영 필수) | 큼 (별 마일스톤) | 운영자 |
+| 2 | S11.1 ABI args 디코딩 | ★★ (진단 깊이) | 중-큼 | dApp 개발자 |
+| 3 | S12.1 enum 세분화 | ★★ (정밀도) | 큼 | dApp 개발자 |
+| 4 | S13.1 패키지 게시 | ★ (운영성) | 작/중 | dApp 개발자 |
+| 5 | OS resolver 캐시 race (hickory-dns) | ★ (잔여 SSRF 갭, 첫 요구 후) | 중 | 보안 운영자 |
+| 6 | Pools/Traders FE | ☆ (D001 정신) | 작 | 데모 사용자 |
 
 **해석**:
-- #1: 가장 빠른 wins — S15에서 시작한 M005 표면을 *examples client에 마감*.
-- #2: 인증 — *별 마일스톤 가치*. 단독 슬라이스로는 부담, M006 또는 M005.1
-  핵심 슬라이스로.
-- #3·#4: dApp 개발자 깊이 — *체감 가치 vs 부담*의 균형.
-- #5·#6: 첫 사용자 명시 요청 후 (D017 / HARDEN3 정신).
-- #7: 영영 안 해도 무방 (D001).
+- #1: 인증 — *별 마일스톤 가치*. 단독 슬라이스로는 부담, M006 또는 M005.1
+  핵심 슬라이스로. M005-SUMMARY가 끌어올린 1순위.
+- #2·#3: dApp 개발자 깊이 — *체감 가치 vs 부담*의 균형.
+- #4·#5: 첫 사용자 명시 요청 후 (D017 / HARDEN3 정신).
+- #6: 영영 안 해도 무방 (D001).
 
 ## 운영 규칙
 
