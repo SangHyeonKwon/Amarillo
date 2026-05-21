@@ -269,8 +269,35 @@ curl -sX POST http://localhost:3000/v1/contract-labels \
 The endpoint is **UPSERT** — re-POSTing the same address rewrites the
 label/owner. `address` lowercases server-side.
 
-TypeScript: extend `AmarilloClient` (or just call `fetch` directly with the
-shape above). Python: same pattern via `urllib.request.Request(method='POST', …)`.
+```typescript
+import { AmarilloClient } from "./client.ts";
+
+const client = new AmarilloClient("http://localhost:3000");
+const label = await client.createContractLabel({
+  address:  "0xfeed000000000000000000000000000000000bee",
+  label:    "MyArbBot-3",
+  owner_id: "alice",
+});
+console.log(label.address, label.label, label.owner_id);
+```
+
+```python
+from client import AmarilloClient
+
+client = AmarilloClient("http://localhost:3000")
+label = client.create_contract_label(
+    address="0xfeed000000000000000000000000000000000bee",
+    label="MyArbBot-3",
+    owner_id="alice",
+)
+print(label.address, label.label, label.owner_id)
+```
+
+Cleanup (when you're done with the demo):
+`await client.deleteContractLabel("0xfeed…0bee")` /
+`client.delete_contract_label("0xfeed…0bee")` — returns 204 the first time,
+raises `AmarilloError(404)` on the second (intentional idempotency
+signal — operators treat 404 as "already removed").
 
 ### Step 2: subscribe with `sub_type='rate_threshold'`
 

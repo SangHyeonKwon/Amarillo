@@ -100,6 +100,16 @@ export interface FailedTxByLabelPoint {
   by_category: Record<string, number>;
 }
 
+/** S15 / M005 — contract label row (admin endpoints). */
+export interface ContractLabel {
+  /** Lowercased 0x + 40 hex. */
+  address: string;
+  label: string;
+  /** Tenancy hint — `null` = public label. */
+  owner_id: string | null;
+  created_at: string;
+}
+
 export interface AlertSubscription {
   subscription_id: number;
   error_category: ErrorCategory | null;
@@ -148,6 +158,16 @@ export interface CreateAlertBody {
   webhook_url: string;
   error_category?: ErrorCategory;
   to_addr?: string;
+}
+
+/** S15 / M005 — body for the contract-labels admin POST. */
+export interface CreateLabelBody {
+  /** `0x` + 40 hex (server lowercases it). */
+  address: string;
+  /** Human-readable label (non-empty, server caps at 100 bytes). */
+  label: string;
+  /** Tenancy hint — omit for a public label. */
+  owner_id?: string;
 }
 
 /** HTTP error from the Amarillo API — `status` is the HTTP code. */
@@ -286,6 +306,37 @@ export class AmarilloClient {
       `/v1/alert-subscriptions/${id}/rotate-secret`,
     );
     return r.data;
+  }
+
+  /**
+   * `POST /v1/contract-labels` — admin UPSERT (S15 / M005).
+   *
+   * Returns the row with `address` lowercased server-side. Calling twice with
+   * the same address overwrites label / owner_id (UPSERT semantics). The
+   * endpoint is **unauthenticated** in the demo build — production deployments
+   * must put an auth middleware in front before exposing it.
+   */
+  async createContractLabel(body: CreateLabelBody): Promise<ContractLabel> {
+    const r = await this.request<{ data: ContractLabel }>(
+      "POST",
+      `/v1/contract-labels`,
+      body,
+    );
+    return r.data;
+  }
+
+  /**
+   * `DELETE /v1/contract-labels/{address}` — admin (S15 / M005).
+   *
+   * Throws `AmarilloError(404)` if the address isn't in the table.
+   * Idempotency: a second delete on the same address re-throws 404 (operators
+   * treat that as a no-op signal during retry).
+   */
+  async deleteContractLabel(address: string): Promise<void> {
+    await this.request<void>(
+      "DELETE",
+      `/v1/contract-labels/${encodeURIComponent(address)}`,
+    );
   }
 }
 

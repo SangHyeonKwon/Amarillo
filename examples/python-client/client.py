@@ -173,6 +173,25 @@ class FailedTxByLabelPoint:
 
 
 @dataclass(frozen=True)
+class ContractLabel:
+    """S15 / M005 — contract label row (admin endpoints)."""
+
+    address: str
+    label: str
+    owner_id: Optional[str]
+    created_at: str
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ContractLabel":
+        return cls(
+            address=d["address"],
+            label=d["label"],
+            owner_id=d["owner_id"],
+            created_at=d["created_at"],
+        )
+
+
+@dataclass(frozen=True)
 class AlertSubscription:
     """``GET /v1/alert-subscriptions`` row; never carries ``signing_secret``."""
 
@@ -364,6 +383,35 @@ class AmarilloClient:
         """``POST /v1/alert-subscriptions/{id}/rotate-secret`` — same one-time secret contract."""
         r = self._request("POST", f"/v1/alert-subscriptions/{sub_id}/rotate-secret")
         return AlertSubscriptionCreated.from_dict(r["data"])
+
+    def create_contract_label(
+        self,
+        address: str,
+        label: str,
+        owner_id: Optional[str] = None,
+    ) -> ContractLabel:
+        """``POST /v1/contract-labels`` — admin UPSERT (S15 / M005).
+
+        Returns the row with ``address`` lowercased server-side. Calling twice
+        with the same address overwrites ``label`` / ``owner_id``. The
+        endpoint is **unauthenticated** in the demo build — production must
+        put an auth middleware in front.
+        """
+        body: dict = {"address": address, "label": label}
+        if owner_id is not None:
+            body["owner_id"] = owner_id
+        r = self._request("POST", "/v1/contract-labels", body)
+        return ContractLabel.from_dict(r["data"])
+
+    def delete_contract_label(self, address: str) -> None:
+        """``DELETE /v1/contract-labels/{address}`` — admin (S15 / M005).
+
+        Raises ``AmarilloError(404)`` if the address is missing. Idempotency:
+        a second delete re-raises 404, which operators treat as a no-op
+        signal on retry.
+        """
+        from urllib.parse import quote
+        self._request("DELETE", f"/v1/contract-labels/{quote(address, safe='')}")
 
 
 # ── Webhook signature verification ────────────────────────────────────
