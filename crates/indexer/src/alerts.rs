@@ -17,7 +17,7 @@ use serde::Serialize;
 use sha2::Sha256;
 use sqlx::PgPool;
 
-use db::models::AlertMatch;
+use db::models::{AlertMatch, RateAlertMatch};
 use db::validators::webhook_url_is_safe;
 
 const USER_AGENT: &str = concat!("amarillo-alerts/", env!("CARGO_PKG_VERSION"));
@@ -101,6 +101,12 @@ pub struct DispatchMetrics {
     /// claim 실패로 스킵된 매칭 — 다른 워커가 들고 있거나 이미 delivered
     /// (HARDEN-T02). 정상 분산 처리의 신호이지 결함이 아님.
     pub claim_skipped: u64,
+    /// rate_threshold 발송 시도 누적 (S14/M005)
+    pub rate_attempted: u64,
+    /// rate_threshold 성공 발송 누적
+    pub rate_delivered: u64,
+    /// rate_threshold 실패 발송 누적
+    pub rate_failed: u64,
 }
 
 /// webhook 본문 페이로드 — `serde` derive로 키 순서(struct 정의 순) 고정해 서명
@@ -120,6 +126,28 @@ fn build_payload(m: &AlertMatch) -> String {
         tx_hash: &m.tx_hash,
     })
     .expect("AlertPayload {i64, &str} cannot fail to serialize")
+}
+
+/// rate_threshold 발송용 본문 (S14/M005) — per-event과는 *다른 스키마*임을
+/// `sub_type` 필드로 명시. 수신측이 한 webhook URL로 두 종류 모두 처리 가능.
+#[derive(Serialize)]
+struct RateAlertPayload<'a> {
+    subscription_id: i64,
+    sub_type: &'a str,
+    match_count: i64,
+    threshold_count: i32,
+    threshold_window_secs: i32,
+}
+
+fn build_rate_payload(m: &RateAlertMatch) -> String {
+    serde_json::to_string(&RateAlertPayload {
+        subscription_id: m.subscription_id,
+        sub_type: "rate_threshold",
+        match_count: m.match_count,
+        threshold_count: m.threshold_count,
+        threshold_window_secs: m.threshold_window_secs,
+    })
+    .expect("RateAlertPayload cannot fail to serialize")
 }
 
 async fn post_signed(
@@ -315,7 +343,135 @@ pub async fn dispatch_once(
     Ok(())
 }
 
-/// 디스패처 루프 — [`dispatch_once`] → sleep → 반복. ctrl_c graceful 종료.
+/// rate_threshold 단일 매칭 처리: SSRF 가드 → 서명 → POST → record_rate_alert_dispatch.
+///
+/// claim 패턴 불필요 — rate matcher SQL이 이미 디바운스로 race-safe하다(같은 sub의
+/// 마지막 INSERT 이후 debounce_secs 동안 다음 매칭에서 빠짐). 두 worker가 *동시*에
+/// 같은 sub을 잡아 둘 다 발송하는 짧은 race는 허용 — 그 다음 매칭 시점부터는
+/// 늦은 INSERT가 디바운스 시작 기준이 됨.
+async fn dispatch_rate_item(
+    pool: PgPool,
+    client: reqwest::Client,
+    item: RateAlertMatch,
+) -> Result<DispatchOutcome> {
+    if let Err(reason) = webhook_url_is_safe(&item.webhook_url) {
+        tracing::warn!(
+            subscription_id = item.subscription_id,
+            ?reason,
+            "rate webhook URL unsafe — skipping (recorded as failed)"
+        );
+        db::queries::record_rate_alert_dispatch(
+            &pool,
+            item.subscription_id,
+            item.match_count as i32,
+            false,
+            Some(&format!("unsafe url: {reason:?}")),
+        )
+        .await?;
+        return Ok(DispatchOutcome::UnsafeUrl);
+    }
+    let key = match hex::decode(&item.signing_secret) {
+        Ok(k) => k,
+        Err(_) => {
+            tracing::warn!(
+                subscription_id = item.subscription_id,
+                "stored signing_secret is not valid hex — recording as failed"
+            );
+            db::queries::record_rate_alert_dispatch(
+                &pool,
+                item.subscription_id,
+                item.match_count as i32,
+                false,
+                Some("corrupt signing_secret (not hex)"),
+            )
+            .await?;
+            return Ok(DispatchOutcome::Failed);
+        }
+    };
+    let body = build_rate_payload(&item);
+    let signature = sign_payload(&key, body.as_bytes());
+    match post_signed(&client, &item.webhook_url, &signature, body).await {
+        Ok(()) => {
+            db::queries::record_rate_alert_dispatch(
+                &pool,
+                item.subscription_id,
+                item.match_count as i32,
+                true,
+                None,
+            )
+            .await?;
+            tracing::info!(
+                subscription_id = item.subscription_id,
+                match_count = item.match_count,
+                "rate alert delivered"
+            );
+            Ok(DispatchOutcome::Delivered)
+        }
+        Err(e) => {
+            let err_msg: String = redact_urls(&e.to_string()).chars().take(500).collect();
+            tracing::warn!(
+                subscription_id = item.subscription_id,
+                error = %err_msg,
+                "rate alert delivery failed (will retry next cycle after window)"
+            );
+            db::queries::record_rate_alert_dispatch(
+                &pool,
+                item.subscription_id,
+                item.match_count as i32,
+                false,
+                Some(&err_msg),
+            )
+            .await?;
+            Ok(DispatchOutcome::Failed)
+        }
+    }
+}
+
+/// rate_threshold 디스패처 1사이클 — 매칭 자격 있는 rate sub을 모두 발송 (S14/M005).
+///
+/// per-event ([`dispatch_once`]) 와 같은 bounded 동시성 패턴. claim 패턴 불필요
+/// — `find_pending_rate_alert_matches`가 디바운스를 SQL에서 검증.
+pub async fn dispatch_rate_once(
+    pool: &PgPool,
+    client: &reqwest::Client,
+    batch: i64,
+    metrics: &mut DispatchMetrics,
+) -> Result<()> {
+    let pending = db::queries::find_pending_rate_alert_matches(pool, batch).await?;
+    let mut iter = pending.into_iter();
+    let mut tasks: tokio::task::JoinSet<Result<DispatchOutcome>> = tokio::task::JoinSet::new();
+    while tasks.len() < MAX_CONCURRENT_POSTS {
+        let Some(item) = iter.next() else { break };
+        metrics.rate_attempted += 1;
+        let pool = pool.clone();
+        let client = client.clone();
+        tasks.spawn(async move { dispatch_rate_item(pool, client, item).await });
+    }
+    while let Some(joined) = tasks.join_next().await {
+        match joined {
+            Ok(Ok(DispatchOutcome::Delivered)) => metrics.rate_delivered += 1,
+            Ok(Ok(_)) => metrics.rate_failed += 1,
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "rate dispatch task returned error");
+                metrics.rate_failed += 1;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "rate dispatch task panicked or was cancelled");
+                metrics.rate_failed += 1;
+            }
+        }
+        if let Some(item) = iter.next() {
+            metrics.rate_attempted += 1;
+            let pool = pool.clone();
+            let client = client.clone();
+            tasks.spawn(async move { dispatch_rate_item(pool, client, item).await });
+        }
+    }
+    Ok(())
+}
+
+/// 디스패처 루프 — [`dispatch_once`] (per-event) + [`dispatch_rate_once`] (rate) →
+/// sleep → 반복. ctrl_c graceful 종료.
 pub async fn dispatch_loop(pool: PgPool, poll: Duration) -> Result<()> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -331,6 +487,7 @@ pub async fn dispatch_loop(pool: PgPool, poll: Duration) -> Result<()> {
     loop {
         metrics.cycles += 1;
         dispatch_once(&pool, &client, DISPATCH_BATCH, &mut metrics).await?;
+        dispatch_rate_once(&pool, &client, DISPATCH_BATCH, &mut metrics).await?;
         tracing::info!(
             cycle = metrics.cycles,
             attempted = metrics.attempted,
@@ -338,6 +495,9 @@ pub async fn dispatch_loop(pool: PgPool, poll: Duration) -> Result<()> {
             failed = metrics.failed,
             unsafe_url_skipped = metrics.unsafe_url_skipped,
             claim_skipped = metrics.claim_skipped,
+            rate_attempted = metrics.rate_attempted,
+            rate_delivered = metrics.rate_delivered,
+            rate_failed = metrics.rate_failed,
             "dispatch cycle summary"
         );
         tokio::select! {

@@ -6,8 +6,8 @@ use crate::models::{
     AlertMatch, AlertSubscription, Block, CategoryDiagnosis, ContractLabel, DailySwapVolume,
     ErrorCategory, FailedTransaction, FailedTxAnalysis, FailedTxByLabelPoint, FailedTxTrendPoint,
     FunctionSignature, LiquidityEvent, LiquidityEventType, Pool, PoolStats, PriceSnapshot,
-    SnapshotInterval, SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader, TraceLog,
-    Transaction, UserProfile,
+    RateAlertMatch, SnapshotInterval, SwapEvent, TimeBucket, Token, TokenTransfer, TopTrader,
+    TraceLog, Transaction, UserProfile,
 };
 
 /// PostgreSQL enum 값으로 변환하는 헬퍼.
@@ -919,10 +919,11 @@ pub async fn get_swap_events_by_block(
 // Actionable Alerts (S08) — 구독/매칭/전송 기록
 // ============================================
 
-/// 실패 패턴 구독을 생성하고 생성된 행을 반환한다.
+/// 실패 패턴 구독을 `per_event` 모드로 생성하고 생성된 행을 반환한다.
 ///
 /// `error_category`는 enum 텍스트 바인딩(`$1::error_category`)으로 안전 전달.
 /// `webhook_url`/`signing_secret`은 호출자(API)가 검증·생성해 넘긴다.
+/// rate_threshold 모드는 [`insert_alert_subscription_rate`] (S14/M005) 참조.
 #[tracing::instrument(skip(pool, signing_secret))]
 pub async fn insert_alert_subscription(
     pool: &PgPool,
@@ -933,10 +934,12 @@ pub async fn insert_alert_subscription(
 ) -> Result<AlertSubscription, DbError> {
     let cat = error_category.map(error_category_to_sql);
     let row = sqlx::query_as::<_, AlertSubscription>(
-        "INSERT INTO alert_subscription (error_category, to_addr, webhook_url, signing_secret)
-         VALUES ($1::error_category, $2, $3, $4)
+        "INSERT INTO alert_subscription
+             (error_category, to_addr, webhook_url, signing_secret, sub_type)
+         VALUES ($1::error_category, $2, $3, $4, 'per_event')
          RETURNING subscription_id, error_category, to_addr, webhook_url,
-                   signing_secret, active, created_at",
+                   signing_secret, active, created_at,
+                   sub_type, threshold_count, threshold_window_secs, debounce_secs",
     )
     .bind(cat)
     .bind(to_addr)
@@ -955,7 +958,8 @@ pub async fn list_alert_subscriptions(
 ) -> Result<Vec<AlertSubscription>, DbError> {
     let rows = sqlx::query_as::<_, AlertSubscription>(
         "SELECT subscription_id, error_category, to_addr, webhook_url,
-                signing_secret, active, created_at
+                signing_secret, active, created_at,
+                sub_type, threshold_count, threshold_window_secs, debounce_secs
          FROM alert_subscription
          ORDER BY subscription_id DESC
          LIMIT $1",
@@ -1004,6 +1008,7 @@ pub async fn find_pending_alert_matches(
            ON (s.error_category IS NULL OR s.error_category = f.error_category)
          LEFT JOIN transaction t ON t.tx_hash = f.tx_hash
          WHERE s.active
+           AND s.sub_type = 'per_event'
            AND (s.to_addr IS NULL OR s.to_addr = t.to_addr)
            AND NOT EXISTS (
                  SELECT 1 FROM alert_delivery d
@@ -1087,13 +1092,130 @@ pub async fn rotate_alert_subscription_secret(
             SET signing_secret = $2
           WHERE subscription_id = $1 AND active = TRUE
         RETURNING subscription_id, error_category, to_addr, webhook_url,
-                  signing_secret, active, created_at",
+                  signing_secret, active, created_at,
+                  sub_type, threshold_count, threshold_window_secs, debounce_secs",
     )
     .bind(subscription_id)
     .bind(new_secret)
     .fetch_optional(pool)
     .await?;
     Ok(row)
+}
+
+// ============================================
+// Rate-threshold alerts (S14 / M005) — 임계율 집계 알림
+// ============================================
+
+/// `rate_threshold` 모드 구독을 생성하고 생성된 행을 반환한다 (S14/M005).
+///
+/// CHECK 제약(`alert_subscription_rate_fields_chk`)으로 threshold_count > 0,
+/// threshold_window_secs > 0, debounce_secs >= 0 자동 검증 — 잘못된 값은
+/// Postgres가 거부(API 계층이 사전 검증으로 400 매핑).
+#[tracing::instrument(skip(pool, signing_secret))]
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_alert_subscription_rate(
+    pool: &PgPool,
+    error_category: Option<&ErrorCategory>,
+    to_addr: Option<&str>,
+    webhook_url: &str,
+    signing_secret: &str,
+    threshold_count: i32,
+    threshold_window_secs: i32,
+    debounce_secs: i32,
+) -> Result<AlertSubscription, DbError> {
+    let cat = error_category.map(error_category_to_sql);
+    let row = sqlx::query_as::<_, AlertSubscription>(
+        "INSERT INTO alert_subscription
+             (error_category, to_addr, webhook_url, signing_secret,
+              sub_type, threshold_count, threshold_window_secs, debounce_secs)
+         VALUES ($1::error_category, $2, $3, $4, 'rate_threshold', $5, $6, $7)
+         RETURNING subscription_id, error_category, to_addr, webhook_url,
+                   signing_secret, active, created_at,
+                   sub_type, threshold_count, threshold_window_secs, debounce_secs",
+    )
+    .bind(cat)
+    .bind(to_addr)
+    .bind(webhook_url)
+    .bind(signing_secret)
+    .bind(threshold_count)
+    .bind(threshold_window_secs)
+    .bind(debounce_secs)
+    .fetch_one(pool)
+    .await?;
+    Ok(row)
+}
+
+/// 발송 자격 있는 rate_threshold 매칭을 최대 `limit`개 반환한다 (S14/M005).
+///
+/// 매칭 조건:
+/// 1. sub.active AND sub_type='rate_threshold'
+/// 2. category/to_addr 매칭 (NULL = 모두 매칭, S08 동일)
+/// 3. f.timestamp >= NOW() - threshold_window_secs (시간 윈도우)
+/// 4. NOT EXISTS (alert_rate_dispatch 중 debounce_secs 안에 발송된 행) — 디바운스
+/// 5. COUNT(matches) >= threshold_count
+///
+/// 디바운스 검증이 SQL 안에서 race-safe하게 수행 — 두 worker가 같은 sub을 동시에
+/// 매칭해도 *둘 다* INSERT 가능하지만, 다음 매칭 시점부터는 마지막 INSERT 시각
+/// 기준으로 debounce_secs 동안 걸러짐. 1-2회의 짧은 race overlap만 허용.
+#[tracing::instrument(skip(pool))]
+pub async fn find_pending_rate_alert_matches(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<RateAlertMatch>, DbError> {
+    let rows = sqlx::query_as::<_, RateAlertMatch>(
+        "SELECT s.subscription_id, s.webhook_url, s.signing_secret,
+                COUNT(f.tx_hash)::BIGINT AS match_count,
+                s.threshold_count, s.threshold_window_secs
+         FROM alert_subscription s
+         JOIN failed_transaction f
+           ON (s.error_category IS NULL OR s.error_category = f.error_category)
+         LEFT JOIN transaction t ON t.tx_hash = f.tx_hash
+         WHERE s.active
+           AND s.sub_type = 'rate_threshold'
+           AND (s.to_addr IS NULL OR s.to_addr = t.to_addr)
+           AND f.timestamp >= NOW() - (s.threshold_window_secs * INTERVAL '1 second')
+           AND NOT EXISTS (
+             SELECT 1 FROM alert_rate_dispatch d
+             WHERE d.subscription_id = s.subscription_id
+               AND d.dispatched_at > NOW() - (s.debounce_secs * INTERVAL '1 second')
+           )
+         GROUP BY s.subscription_id, s.webhook_url, s.signing_secret,
+                  s.threshold_count, s.threshold_window_secs
+         HAVING COUNT(f.tx_hash) >= s.threshold_count
+         ORDER BY s.subscription_id
+         LIMIT $1",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// rate_threshold 발송 결과를 기록한다 (디바운스 검증의 *마지막 발송 시각* 출처).
+///
+/// `match_count`는 발송 시점의 윈도우 매칭 수(payload에도 동일 값 포함).
+/// `last_error`는 발송 실패 시 redacted 에러 메시지.
+#[tracing::instrument(skip(pool, last_error))]
+pub async fn record_rate_alert_dispatch(
+    pool: &PgPool,
+    subscription_id: i64,
+    match_count: i32,
+    delivered: bool,
+    last_error: Option<&str>,
+) -> Result<(), DbError> {
+    let status = if delivered { "delivered" } else { "failed" };
+    sqlx::query(
+        "INSERT INTO alert_rate_dispatch
+             (subscription_id, match_count, status, last_error)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(subscription_id)
+    .bind(match_count)
+    .bind(status)
+    .bind(last_error)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 // ============================================
