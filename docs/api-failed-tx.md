@@ -5,6 +5,99 @@
 > totals, and a category **trend** feed. Three endpoints, consistent envelope,
 > embeddable. Runnable example & smoke: `./scripts/verify-failed-tx.sh`.
 
+## Authentication
+
+**Read-only GET endpoints are public** (embed-friendly). **Write/admin
+endpoints require an API key** (S16/M006).
+
+The api server reads its admin key from `AMARILLO_ADMIN_API_KEY` at startup
+(`ApiConfig::from_env` refuses to boot if it's missing or empty — D004
+spirit, no silent default). 32+ bytes is recommended (a WARN log fires
+below that, but boot is not blocked — operational flexibility).
+
+Send the key as a Bearer token on every protected request:
+
+```http
+Authorization: Bearer <AMARILLO_ADMIN_API_KEY>
+```
+
+### Protected routes (S16/D021 — X policy: write/admin only)
+
+| Method   | Path                                                   | Slice |
+|----------|--------------------------------------------------------|-------|
+| `POST`   | `/v1/contract-labels`                                  | S15   |
+| `DELETE` | `/v1/contract-labels/{address}`                        | S15   |
+| `POST`   | `/v1/alert-subscriptions`                              | S08   |
+| `DELETE` | `/v1/alert-subscriptions/{id}`                         | S08   |
+| `POST`   | `/v1/alert-subscriptions/{id}/rotate-secret`           | HARDEN2 |
+
+All other `GET /v1/*` routes (single diagnosis, list, timeseries, by-label,
+list-subscriptions, etc.) and `/health` ignore the header and remain
+public — that preserves the embed surface (M001's core value).
+
+### Failure response
+
+Any failure to authenticate — header missing, malformed prefix, wrong
+length, wrong value — returns the **same** 401 (S16/D021 — no info leak):
+
+```http
+HTTP/1.1 401 Unauthorized
+Content-Type: application/json
+
+{"error":"unauthorized"}
+```
+
+The server does **not** indicate which check failed. Comparing the key
+itself is constant-time (`subtle::ConstantTimeEq`) to keep timing attacks
+off the table.
+
+### Examples
+
+```bash
+# Valid call
+curl -sX POST http://localhost:3000/v1/contract-labels \
+  -H "authorization: Bearer ${AMARILLO_ADMIN_API_KEY}" \
+  -H 'content-type: application/json' \
+  -d '{"address":"0xfeed…","label":"MyBot","owner_id":"alice"}'
+
+# Missing header — 401
+curl -sX POST http://localhost:3000/v1/contract-labels \
+  -H 'content-type: application/json' \
+  -d '{"address":"0xfeed…","label":"x"}'
+# → {"error":"unauthorized"}
+
+# Public GET — works without the key
+curl -s http://localhost:3000/v1/failed-tx/0xdead…0001
+```
+
+### Rotation
+
+A leak is handled by rotating the env var and restarting the api:
+
+1. Generate a new value (32+ random bytes; e.g. `openssl rand -hex 32`).
+2. Update `AMARILLO_ADMIN_API_KEY` in your `.env` / secret manager.
+3. Restart the api service (`docker compose up -d --force-recreate api`
+   or your orchestrator's equivalent).
+4. Update every client that holds the key — verify scripts, examples,
+   the frontend `/alerts` page (S18), any external integration. All of
+   them get *new* HTTP 401s until they pick up the new key.
+
+In-flight requests with the old key receive 401 immediately after the
+new binary starts; there's no overlap window. Multi-key runtime rotation
+(no restart) would require a DB-backed key store, which is a separate
+slice (M006+).
+
+### Why no JWT / OAuth / scope?
+
+The current call pattern is **server↔server only** — operator scripts,
+example clients, and the frontend's server side. No human-OAuth flow,
+no per-tenant scope, no short-lived expiry is in scope (D021/D017
+spirit: "first user asks first"). The shape is intentionally minimal so
+that the auth model can later evolve toward DB-backed multi-key or
+signed-JWT *if a real use case asks for it* — none has so far.
+
+---
+
 ## `GET /v1/failed-tx/{tx_hash}`
 
 Returns the decoded/classified failure record for a single transaction plus its
@@ -347,14 +440,13 @@ Idempotency note: the *second* DELETE on the same address returns 404 (the
 row is already gone). Operators treating 404 as a no-op signal during retry
 is the intended interpretation.
 
-### Auth (or the lack of it)
+### Auth
 
-Both admin endpoints **ship unauthenticated** — they're a demo-scope
-surface (D008 / D019). Production deployments **must** put an auth
-middleware in front (e.g. an API key or signed JWT layer at the router
-boundary) before exposing `/v1/contract-labels/*` outside an operator-only
-network. The shape is stable; only the access control is intentionally
-deferred to a separate slice.
+Both admin endpoints are protected by `Authorization: Bearer
+<AMARILLO_ADMIN_API_KEY>` (S16/M006) — see the [Authentication](#authentication)
+section at the top of this file for the full policy, including how the
+header is verified, the 401 contract, and rotation. The earlier
+"unauthenticated, demo-scope" state (D008 / D019) was closed by S16.
 
 ### Why this is the moat
 

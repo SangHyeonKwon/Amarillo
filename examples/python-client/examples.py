@@ -5,9 +5,14 @@ Three runnable scenarios against the Amarillo API. Run with:
     python3 examples.py http://localhost:3000
 
 Each ``demo_xxx`` is independent — comment out the calls in ``main`` to skip.
+
+The alert-subscription scenario (#2) hits write/admin endpoints that require
+the admin API key. Set ``AMARILLO_ADMIN_API_KEY`` in your environment to run
+it — otherwise it's skipped with a notice (S16/M006).
 """
 import hashlib
 import hmac
+import os
 import sys
 
 from client import AmarilloClient, AmarilloError, verify_alert_signature
@@ -121,9 +126,16 @@ def main() -> int:
         )
         return 2
     base_url = sys.argv[1]
-    client = AmarilloClient(base_url)
+    api_key = os.environ.get("AMARILLO_ADMIN_API_KEY")
+    if not api_key:
+        print(
+            "  note: AMARILLO_ADMIN_API_KEY not set — write/admin demo (#2) will be skipped.\n"
+            "        Set it in your env to run that scenario (S16/M006)."
+        )
+    client = AmarilloClient(base_url, api_key=api_key)
     demo_single_diagnosis(client)
-    demo_alert_subscription(client)
+    if api_key:
+        demo_alert_subscription(client)
     demo_by_label(client)
     return 0
 

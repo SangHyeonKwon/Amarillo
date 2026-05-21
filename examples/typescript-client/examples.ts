@@ -6,6 +6,10 @@
  * (or compile with `tsc` and `node examples.js http://localhost:3000`).
  *
  * Each `demoXxx` is independent — comment out the calls in `main` to skip.
+ *
+ * The alert-subscription scenario (#2) hits write/admin endpoints that require
+ * the admin API key. Set `AMARILLO_ADMIN_API_KEY` in your environment to run
+ * it — otherwise it's skipped with a notice (S16/M006).
  */
 import { createHmac } from "node:crypto";
 
@@ -122,9 +126,18 @@ async function main(): Promise<void> {
     console.error("usage: tsx examples.ts <amarillo-base-url>   (e.g. http://localhost:3000)");
     process.exit(2);
   }
-  const client = new AmarilloClient(baseUrl);
+  const apiKey = process.env.AMARILLO_ADMIN_API_KEY;
+  if (!apiKey) {
+    console.log(
+      "  note: AMARILLO_ADMIN_API_KEY not set — write/admin demo (#2) will be skipped.\n" +
+      "        Set it in your env to run that scenario (S16/M006).",
+    );
+  }
+  const client = new AmarilloClient(baseUrl, { apiKey });
   await demoSingleDiagnosis(client);
-  await demoAlertSubscription(client);
+  if (apiKey) {
+    await demoAlertSubscription(client);
+  }
   await demoByLabel(client);
 }
 

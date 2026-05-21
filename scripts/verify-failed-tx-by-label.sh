@@ -20,8 +20,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 : "${DATABASE_URL:=postgres://defi:defi@localhost:5432/defi_analytics}"
+: "${AMARILLO_ADMIN_API_KEY:?required (S16/M006) — set in your env or .env. The api server fails to boot without it, and POST/DELETE on /v1/contract-labels all require it (S17 — see docs/api-failed-tx.md#Authentication).}"
 PORT="${API_PORT:-3001}"
-export DATABASE_URL API_HOST=127.0.0.1 API_PORT="$PORT" RUST_LOG="${RUST_LOG:-warn}"
+export DATABASE_URL AMARILLO_ADMIN_API_KEY API_HOST=127.0.0.1 API_PORT="$PORT" RUST_LOG="${RUST_LOG:-warn}"
+
+# S17 — admin/write Authorization header (D021/D022). Applied to all POST/DELETE
+# on /v1/contract-labels. The by-label GET stays unauthenticated.
+AUTH="Authorization: Bearer ${AMARILLO_ADMIN_API_KEY}"
 
 echo "building api..."
 if ! cargo build -p api >/tmp/vlbl-build.log 2>&1; then
@@ -33,7 +38,7 @@ API_PID=$!
 ADMIN_ADDR=""
 cleanup() {
   if [ -n "$ADMIN_ADDR" ]; then
-    curl -fsS -X DELETE "http://127.0.0.1:$PORT/v1/contract-labels/$ADMIN_ADDR" >/dev/null 2>&1 || true
+    curl -fsS -H "$AUTH" -X DELETE "http://127.0.0.1:$PORT/v1/contract-labels/$ADMIN_ADDR" >/dev/null 2>&1 || true
   fi
   kill "$API_PID" 2>/dev/null || true
 }
@@ -114,7 +119,7 @@ ADMIN_ADDR="0xfeed000000000000000000000000000000000515"
 
 # POST create -> 201, address lowercased + label/owner round-trip
 ac=$(curl -s -o /tmp/vlbl-admin-create.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$ADMIN_URL" \
+  -H "$AUTH" -X POST "$ADMIN_URL" \
   --data "{\"address\":\"$ADMIN_ADDR\",\"label\":\"Admin Test Bot\",\"owner_id\":\"verify-script\"}")
 echo "POST create: HTTP $ac"
 if [ "$ac" = 201 ]; then
@@ -131,7 +136,7 @@ fi
 
 # POST upsert (same address, new label) -> 201 with overwritten label
 uc=$(curl -s -o /tmp/vlbl-admin-upsert.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$ADMIN_URL" \
+  -H "$AUTH" -X POST "$ADMIN_URL" \
   --data "{\"address\":\"$ADMIN_ADDR\",\"label\":\"Renamed Bot\",\"owner_id\":\"verify-script\"}")
 echo "POST upsert: HTTP $uc"
 if [ "$uc" = 201 ]; then
@@ -148,7 +153,7 @@ fi
 
 # POST invalid address -> 400
 ic=$(curl -s -o /tmp/vlbl-admin-bad.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$ADMIN_URL" \
+  -H "$AUTH" -X POST "$ADMIN_URL" \
   --data '{"address":"0xnothex","label":"Bad"}')
 echo "POST bad address: HTTP $ic"
 if [ "$ic" = 400 ] && grep -q '"error"' /tmp/vlbl-admin-bad.json; then
@@ -159,7 +164,7 @@ fi
 
 # POST empty label -> 400
 ec=$(curl -s -o /tmp/vlbl-admin-emptylabel.json -w '%{http_code}' -H 'Content-Type: application/json' \
-  -X POST "$ADMIN_URL" \
+  -H "$AUTH" -X POST "$ADMIN_URL" \
   --data "{\"address\":\"0xaaaa000000000000000000000000000000000aaa\",\"label\":\"\"}")
 echo "POST empty label: HTTP $ec"
 if [ "$ec" = 400 ] && grep -q '"error"' /tmp/vlbl-admin-emptylabel.json; then
@@ -169,7 +174,7 @@ else
 fi
 
 # DELETE existing -> 204
-dc=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ADMIN_URL/$ADMIN_ADDR")
+dc=$(curl -s -o /dev/null -w '%{http_code}' -H "$AUTH" -X DELETE "$ADMIN_URL/$ADMIN_ADDR")
 echo "DELETE existing: HTTP $dc"
 if [ "$dc" = 204 ]; then
   echo "  PASS"
@@ -179,7 +184,7 @@ else
 fi
 
 # DELETE again -> 404
-dc2=$(curl -s -o /tmp/vlbl-admin-del2.json -w '%{http_code}' -X DELETE "$ADMIN_URL/0xfeed000000000000000000000000000000000515")
+dc2=$(curl -s -o /tmp/vlbl-admin-del2.json -w '%{http_code}' -H "$AUTH" -X DELETE "$ADMIN_URL/0xfeed000000000000000000000000000000000515")
 echo "DELETE same again: HTTP $dc2"
 if [ "$dc2" = 404 ] && grep -q '"error"' /tmp/vlbl-admin-del2.json; then
   echo "  PASS"
@@ -188,12 +193,34 @@ else
 fi
 
 # DELETE invalid address -> 400
-dbc=$(curl -s -o /tmp/vlbl-admin-delbad.json -w '%{http_code}' -X DELETE "$ADMIN_URL/0xnothex")
+dbc=$(curl -s -o /tmp/vlbl-admin-delbad.json -w '%{http_code}' -H "$AUTH" -X DELETE "$ADMIN_URL/0xnothex")
 echo "DELETE bad address: HTTP $dbc"
 if [ "$dbc" = 400 ] && grep -q '"error"' /tmp/vlbl-admin-delbad.json; then
   echo "  PASS"
 else
   echo "  FAIL"; cat /tmp/vlbl-admin-delbad.json; fail=1
+fi
+
+# --- AUTH (S17): missing header on POST -> 401 (info-leak 방지로 단일 응답) ---
+nac=$(curl -s -o /tmp/vlbl-admin-noauth.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$ADMIN_URL" \
+  --data '{"address":"0xcafe000000000000000000000000000000000401","label":"noauth"}')
+echo "POST no auth header: HTTP $nac"
+if [ "$nac" = 401 ] && grep -q '"error":"unauthorized"' /tmp/vlbl-admin-noauth.json; then
+  echo "  PASS"
+else
+  echo '  FAIL — expected 401 {"error":"unauthorized"}'; cat /tmp/vlbl-admin-noauth.json; fail=1
+fi
+
+# --- AUTH (S17): wrong key on DELETE -> 401 (same response — info-leak 방지) ---
+wac=$(curl -s -o /tmp/vlbl-admin-wauth.json -w '%{http_code}' \
+  -H "Authorization: Bearer wrong-key-xxxxxxxxxx" \
+  -X DELETE "$ADMIN_URL/0xcafe000000000000000000000000000000000401")
+echo "DELETE wrong key: HTTP $wac"
+if [ "$wac" = 401 ] && grep -q '"error":"unauthorized"' /tmp/vlbl-admin-wauth.json; then
+  echo "  PASS"
+else
+  echo '  FAIL — expected 401 {"error":"unauthorized"}'; cat /tmp/vlbl-admin-wauth.json; fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then

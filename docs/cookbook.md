@@ -9,6 +9,18 @@ example clients are stdlib-only — copy them straight into your project; no
 The full endpoint contract reference lives in [`api-failed-tx.md`](api-failed-tx.md)
 and [`api-alerts.md`](api-alerts.md). This file is about *using* it.
 
+> **Authentication note (S16/M006)** — write/admin endpoints
+> (`POST/DELETE /v1/contract-labels(*)`, `POST/DELETE/rotate /v1/alert-subscriptions(*)`)
+> require `Authorization: Bearer <AMARILLO_ADMIN_API_KEY>`. **GET endpoints
+> are public** (embed-friendly) and ignore the header. The examples below
+> source the key from your environment:
+> ```bash
+> export AMARILLO_ADMIN_API_KEY=$(grep ^AMARILLO_ADMIN_API_KEY .env | cut -d= -f2)
+> ```
+> Both example clients accept the key in their constructor — see
+> [`api-failed-tx.md#Authentication`](api-failed-tx.md#authentication) for the
+> policy in full.
+
 ---
 
 ## 1. Single-tx diagnosis
@@ -105,6 +117,7 @@ bytes**, keyed by the 32 bytes obtained from hex-decoding the secret.
 
 ```bash
 curl -sX POST http://localhost:3000/v1/alert-subscriptions \
+  -H "authorization: Bearer ${AMARILLO_ADMIN_API_KEY}" \
   -H 'content-type: application/json' \
   -d '{"webhook_url":"https://example.com/hook","error_category":"SLIPPAGE_EXCEEDED"}' \
   | jq
@@ -186,7 +199,9 @@ signatures would never verify.
 ### Rotating the secret
 
 ```bash
-curl -sX POST http://localhost:3000/v1/alert-subscriptions/42/rotate-secret | jq
+curl -sX POST http://localhost:3000/v1/alert-subscriptions/42/rotate-secret \
+  -H "authorization: Bearer ${AMARILLO_ADMIN_API_KEY}" \
+  | jq
 ```
 
 Same one-time-reveal contract as creation. The dispatcher will start
@@ -253,14 +268,14 @@ End-to-end flow for the bot-operator persona: register your bot's address as
 a private label, subscribe to *rate-threshold* alerts (S14 — only fires when
 the failure count crosses a window threshold, then debounces), receive
 signed deliveries, and slice the failures by *your* labels (filtered to
-`owner_id=you`). Auth is intentionally absent at the demo layer
-([`.gsd/DECISIONS.md`](../.gsd/DECISIONS.md) D008 / D019) — production
-deployments put an auth middleware in front of `/v1/contract-labels`.
+`owner_id=you`). All write/admin steps below require the admin API key
+(S16/M006 — [`api-failed-tx.md#Authentication`](api-failed-tx.md#authentication)).
 
 ### Step 1: register your bot as a label
 
 ```bash
 curl -sX POST http://localhost:3000/v1/contract-labels \
+  -H "authorization: Bearer ${AMARILLO_ADMIN_API_KEY}" \
   -H 'content-type: application/json' \
   -d '{"address":"0xfeed000000000000000000000000000000000bee","label":"MyArbBot-3","owner_id":"alice"}' \
   | jq
@@ -272,7 +287,9 @@ label/owner. `address` lowercases server-side.
 ```typescript
 import { AmarilloClient } from "./client.ts";
 
-const client = new AmarilloClient("http://localhost:3000");
+const client = new AmarilloClient("http://localhost:3000", {
+  apiKey: process.env.AMARILLO_ADMIN_API_KEY,
+});
 const label = await client.createContractLabel({
   address:  "0xfeed000000000000000000000000000000000bee",
   label:    "MyArbBot-3",
@@ -282,9 +299,13 @@ console.log(label.address, label.label, label.owner_id);
 ```
 
 ```python
+import os
 from client import AmarilloClient
 
-client = AmarilloClient("http://localhost:3000")
+client = AmarilloClient(
+    "http://localhost:3000",
+    api_key=os.environ["AMARILLO_ADMIN_API_KEY"],
+)
 label = client.create_contract_label(
     address="0xfeed000000000000000000000000000000000bee",
     label="MyArbBot-3",
@@ -303,6 +324,7 @@ signal — operators treat 404 as "already removed").
 
 ```bash
 curl -sX POST http://localhost:3000/v1/alert-subscriptions \
+  -H "authorization: Bearer ${AMARILLO_ADMIN_API_KEY}" \
   -H 'content-type: application/json' \
   -d '{
         "webhook_url":           "https://my-receiver.example.com/bot-alerts",
@@ -417,6 +439,27 @@ writes its `alert_rate_dispatch` row — at worst one extra delivery. Permanent
 duplication is impossible (the *next* cycle's debounce check sees the
 latest `dispatched_at`). Receivers needing strict exactly-once should
 dedupe on `subscription_id + match_count`.
+
+### If you forget the API key
+
+A write call without `Authorization: Bearer <key>` (or with a wrong key)
+returns **401** — same response for every cause (header missing / wrong
+prefix / wrong key / wrong length) so the server doesn't leak which part
+failed (S16/M006/D021):
+
+```bash
+$ curl -sX POST http://localhost:3000/v1/contract-labels \
+    -H 'content-type: application/json' \
+    -d '{"address":"0xfeed…","label":"x"}' \
+    -w '\nHTTP %{http_code}\n'
+{"error":"unauthorized"}
+HTTP 401
+```
+
+The example clients surface this *locally* before the request leaves —
+TypeScript throws `AmarilloError(0, "missing API key: …")`, Python raises
+`ValueError`. That keeps the operator's mistake noisy at the call site
+instead of waiting for a 401.
 
 ---
 

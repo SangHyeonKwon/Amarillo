@@ -181,20 +181,62 @@ export class AmarilloError extends Error {
   }
 }
 
-/** Tiny fetch-based client. Drop-in: `new AmarilloClient("http://localhost:3000")`. */
+/** Constructor options — `apiKey` is required for write/admin calls (S16/M006). */
+export interface ClientOptions {
+  /**
+   * Admin/write API key. Sent as `Authorization: Bearer <key>` on POST/DELETE
+   * routes (`/v1/alert-subscriptions(*)`, `/v1/contract-labels(*)`). Read-only
+   * GET endpoints are unauthenticated (embed-friendly) and ignore this field.
+   *
+   * Omit (or leave `undefined`) if you only use GET endpoints. Calling a write
+   * method without `apiKey` set will throw `AmarilloError(0, "missing API key")`
+   * before the request leaves the client (S17 — surface the operator's mistake
+   * locally rather than waiting for a server 401).
+   */
+  apiKey?: string;
+}
+
+/**
+ * Tiny fetch-based client.
+ *
+ * Drop-in for read-only embeds:
+ * ```
+ * const client = new AmarilloClient("http://localhost:3000");
+ * await client.getFailedTx("0xabc…");
+ * ```
+ *
+ * For write/admin calls (S16/M006), pass an `apiKey`:
+ * ```
+ * const client = new AmarilloClient("http://localhost:3000", { apiKey: process.env.AMARILLO_ADMIN_API_KEY });
+ * await client.createContractLabel({ address, label, owner_id });
+ * ```
+ */
 export class AmarilloClient {
   private readonly baseUrl: string;
+  private readonly apiKey?: string;
 
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, options: ClientOptions = {}) {
     this.baseUrl = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+    this.apiKey = options.apiKey;
   }
 
   private async request<T>(
     method: string,
     path: string,
     body?: unknown,
+    opts: { auth?: "admin" } = {},
   ): Promise<T> {
     const headers: Record<string, string> = {};
+    if (opts.auth === "admin") {
+      if (!this.apiKey) {
+        // Surface locally — don't wait for the server 401 (S17/D021 spirit).
+        throw new AmarilloError(
+          0,
+          "missing API key: this call requires an `apiKey` in ClientOptions (S16/M006)",
+        );
+      }
+      headers["Authorization"] = `Bearer ${this.apiKey}`;
+    }
     let bodyText: string | undefined;
     if (body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -273,7 +315,10 @@ export class AmarilloClient {
     return r.data;
   }
 
-  /** `POST /v1/alert-subscriptions` — signing_secret is revealed exactly once. */
+  /**
+   * `POST /v1/alert-subscriptions` — signing_secret is revealed exactly once.
+   * Requires `apiKey` set on the client (S16/M006).
+   */
   async createAlertSubscription(
     body: CreateAlertBody,
   ): Promise<AlertSubscriptionCreated> {
@@ -281,11 +326,12 @@ export class AmarilloClient {
       "POST",
       `/v1/alert-subscriptions`,
       body,
+      { auth: "admin" },
     );
     return r.data;
   }
 
-  /** `GET /v1/alert-subscriptions` — never returns signing_secret. */
+  /** `GET /v1/alert-subscriptions` — never returns signing_secret. Public (no apiKey). */
   async listAlertSubscriptions(): Promise<AlertSubscription[]> {
     const r = await this.request<{ data: AlertSubscription[] }>(
       "GET",
@@ -294,16 +340,29 @@ export class AmarilloClient {
     return r.data;
   }
 
-  /** `DELETE /v1/alert-subscriptions/{id}` — soft-deactivate. */
+  /**
+   * `DELETE /v1/alert-subscriptions/{id}` — soft-deactivate.
+   * Requires `apiKey` set on the client (S16/M006).
+   */
   async deleteAlertSubscription(id: number): Promise<void> {
-    await this.request<void>("DELETE", `/v1/alert-subscriptions/${id}`);
+    await this.request<void>(
+      "DELETE",
+      `/v1/alert-subscriptions/${id}`,
+      undefined,
+      { auth: "admin" },
+    );
   }
 
-  /** `POST /v1/alert-subscriptions/{id}/rotate-secret` — same one-time secret contract. */
+  /**
+   * `POST /v1/alert-subscriptions/{id}/rotate-secret` — same one-time secret contract.
+   * Requires `apiKey` set on the client (S16/M006).
+   */
   async rotateAlertSecret(id: number): Promise<AlertSubscriptionCreated> {
     const r = await this.request<{ data: AlertSubscriptionCreated }>(
       "POST",
       `/v1/alert-subscriptions/${id}/rotate-secret`,
+      undefined,
+      { auth: "admin" },
     );
     return r.data;
   }
@@ -312,15 +371,18 @@ export class AmarilloClient {
    * `POST /v1/contract-labels` — admin UPSERT (S15 / M005).
    *
    * Returns the row with `address` lowercased server-side. Calling twice with
-   * the same address overwrites label / owner_id (UPSERT semantics). The
-   * endpoint is **unauthenticated** in the demo build — production deployments
-   * must put an auth middleware in front before exposing it.
+   * the same address overwrites label / owner_id (UPSERT semantics).
+   *
+   * Requires `apiKey` set on the client (S16/M006) — `Authorization: Bearer <key>`
+   * header is attached automatically. Calling without `apiKey` throws
+   * `AmarilloError(0, "missing API key")` before the request leaves the client.
    */
   async createContractLabel(body: CreateLabelBody): Promise<ContractLabel> {
     const r = await this.request<{ data: ContractLabel }>(
       "POST",
       `/v1/contract-labels`,
       body,
+      { auth: "admin" },
     );
     return r.data;
   }
@@ -331,11 +393,15 @@ export class AmarilloClient {
    * Throws `AmarilloError(404)` if the address isn't in the table.
    * Idempotency: a second delete on the same address re-throws 404 (operators
    * treat that as a no-op signal during retry).
+   *
+   * Requires `apiKey` set on the client (S16/M006).
    */
   async deleteContractLabel(address: string): Promise<void> {
     await this.request<void>(
       "DELETE",
       `/v1/contract-labels/${encodeURIComponent(address)}`,
+      undefined,
+      { auth: "admin" },
     );
   }
 }
