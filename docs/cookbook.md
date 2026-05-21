@@ -463,6 +463,72 @@ instead of waiting for a 401.
 
 ---
 
+## 5. From the `/alerts` page (S18)
+
+The same write flow as scenario 2/4, driven through the web dashboard
+instead of curl/TS/Python. Use this when you want to demo the
+subscription lifecycle without writing a script.
+
+**Open the page**:
+
+```bash
+docker compose up -d            # postgres + api + web
+open http://localhost:8080/alerts  # or your VITE_APP_BASE_PATH
+```
+
+**Step 1 — apply the admin API key**:
+
+The top of `/alerts` has an "Admin API key" panel. Paste your key, click
+**Apply**. The page collapses the input to "Key active (N chars)" and
+the *Create / Rotate / Deactivate* buttons enable. While the key is
+empty, those buttons are disabled with a `title="API key required
+(S16/M006)"` tooltip — no accidental writes.
+
+The key lives in **React state only** (D024). No `localStorage`, no
+`sessionStorage`, no URL parameter, no build-time injection — refresh
+clears it on purpose. The trade-off is friction; the gain is no
+persistent secret surface accessible to XSS, DevTools, or browser
+history. Use a password manager's auto-fill to soften the re-entry
+friction.
+
+**Step 2 — create a subscription**:
+
+Fill the form (webhook URL, optional category / to_addr, optional rate
+threshold). Click **Create subscription**. The `signing_secret` is
+revealed *once* in a modal — copy it into your webhook receiver's env
+or vault now, because the server can never reveal it again.
+
+**Step 3 — rotate or deactivate from the table**:
+
+Each row has Rotate / Deactivate actions. Rotate fires a fresh secret
+in the same one-time modal; flip your receiver to the new secret
+*before* clicking, since the dispatcher signs with the new value
+immediately. Deactivate is a soft-delete — `alert_delivery` history is
+preserved for audit.
+
+**Step 4 — recover from 401**:
+
+If the server returns 401 (e.g. you cleared the key, or the value was
+wrong), the page shows a red banner: "Unauthorized — enter or re-enter
+your admin API key in the panel above…". Click **Clear**, paste the
+correct key, **Apply**, and retry. Page state for the form is preserved,
+so you don't lose what you typed.
+
+**Why a session-only key on the frontend (D024)**:
+
+- `localStorage` / `sessionStorage` are *XSS targets* — a content-injected
+  script would lift the key on any visit.
+- `NEXT_PUBLIC_*` / `VITE_*` build-time env vars get baked into the
+  bundle; source maps and DevTools expose them.
+- URL params end up in browser history and proxy logs.
+
+A React state slot loses to XSS only if the attacker is already on the
+page during use — same window of exposure as the server-side env-only
+key model on the backend (D023). Refresh = lose key is the operational
+signal that bridges those two halves.
+
+---
+
 ## Why no `npm install` / `pip install`?
 
 Per [`.gsd/DECISIONS.md`](../.gsd/DECISIONS.md) D017, the example clients

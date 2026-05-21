@@ -430,3 +430,55 @@
     401. 첫 호출 직후 즉시 발견되어 실무 위험 낮음.
 - **검증 제약(D021 일관)**: ApiConfig 단위테스트(env 미설정 / 빈 문자열 /
   짧은 키 [WARN] / 정상 키) + Debug에서 키 미노출 단언.
+
+## D024 — 프론트 키 저장: 세션 메모리 + module-mutable + Context sync
+
+- **결정**: 프론트 `/alerts` 페이지의 API 키는 **React state 메모리에만** 저장.
+  `localStorage` / `sessionStorage` / cookie / URL 파라미터 — *모두 X*. 빌드
+  타임 환경 변수(`NEXT_PUBLIC_*`, `VITE_*`) 주입도 미사용. 사용자가 *런타임에
+  직접 입력*. 새로고침하면 키 사라짐 = 의도된 운영 안전 시그널.
+  - 호출 구조 (**A안 채택**): `@/api/client`에 모듈 mutable `_apiKey: string | null`
+    슬롯 + `setAdminApiKey(k)` export. `apiPost` / `apiDelete`가 슬롯 값을
+    읽어 `Authorization: Bearer` 자동 부착. React `<ApiKeyProvider>`가
+    `useEffect`로 state→슬롯 sync. 기존 mutation hook 호출처 *0 갱신*.
+  - 대안 B (helper signature `apiPost(path, body, { apiKey })`)는 `hooks.ts`
+    의 mutation 5개 + 모든 호출처 갱신 부담. 동일 안전 보장에 작업량만 큼.
+- **이유**:
+  - localStorage / sessionStorage = *XSS 표면*. attacker JS가 `localStorage.getItem`
+    으로 키 절도 → write/admin 라우트 자유. React state in memory는 XSS도
+    같은 페이지에 침투해야 접근 가능 (악조건 동일 — 표면 X 증가, 운영자 *상시
+    위험*은 X).
+  - cookie = *CSRF 표면* + `HttpOnly`는 JS 접근 X라 fetch에 못 부착.
+  - 빌드 타임 주입(`NEXT_PUBLIC_*`) = *번들에 박힘* → 소스맵 / DevTools에서
+    누구나 읽기 가능. *운영 키* 박으면 즉시 노출.
+  - URL 파라미터 = 브라우저 히스토리 + 서버 로그에 평문 노출.
+  - 새로고침 = 키 사라짐: 운영자에게 *세션 한정* 정직 시그널. 비밀번호 매니저
+    자동 입력으로 마찰 보완 가능 (cookbook 권고).
+- **스코프**:
+  - `web/src/state/apiKey.tsx`: `ApiKeyProvider` + `useApiKey()` (Context).
+    state 변경 시 `useEffect`로 `setAdminApiKey()` 호출.
+  - `web/src/api/client.ts`: 모듈 mutable + `setAdminApiKey` export. `apiPost` /
+    `apiDelete`가 `_apiKey != null`이면 `Authorization` 헤더 자동 부착. `apiGet`은
+    무부착 (D021/X 정책 — 임베드성 보존).
+  - `web/src/components/ApiKeyInput.tsx`: 페이지 상단 입력 폼. `<input type="password">`
+    + Apply / Clear. 키 활성 시 *길이만* 표시 (값은 표시 X).
+  - `web/src/pages/Alerts.tsx`: `<ApiKeyInput />` 상단 + write 버튼 disabled
+    (`!apiKey || ...`) + 401 응답 시 *키 입력 패널로 시선 유도* 메시지
+    (`describeError(err)`).
+  - `web/src/App.tsx`: `<ApiKeyProvider>`로 라우터 트리 래핑.
+- **트레이드오프**:
+  - 새로고침마다 키 재입력 — *운영자 마찰*. 비밀번호 매니저 자동 입력 권고로
+    완화. 잦은 reload가 부담이면 *별 슬라이스*로 sessionStorage 옵트인 등
+    검토 가능 — 본 슬라이스 스코프 밖.
+  - 모듈 mutable 상태 = *non-React state*. 테스트가 `setAdminApiKey(null)` 로
+    명시적 reset 필요 (`beforeEach`). 패턴은 작고 격리됨 (한 슬롯).
+  - Provider unmount 시 `useEffect cleanup`에서 슬롯도 `null`로 비움 — 페이지
+    전환 후 slot 잔재 차단.
+- **검증 제약(D009~D023 일관)**:
+  - `web/src/api/client.test.ts` 8 case (setAdminApiKey 정규화 / apiPost 부착·미부착 /
+    apiDelete 부착·미부착 / apiGet 무부착 / null 후 즉시 wipe).
+  - `web/src/App.smoke.test.tsx` 무회귀 — Provider 래핑 컴파일·렌더 단언.
+  - Alerts 페이지의 write 버튼 disabled 로직은 *수동 검증* (vitest UI 클릭
+    시뮬 부담; 컴파일 단언 + 코드 리뷰로 1차 보장).
+  - 라이브 401 응답 시 메시지 변환은 `describeError` 단위테스트 추가 가능 —
+    본 슬라이스 스코프에는 미포함 (마찰 ↓, 추후 후속).

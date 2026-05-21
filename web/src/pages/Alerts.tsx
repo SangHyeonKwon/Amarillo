@@ -15,14 +15,28 @@ import {
   ERROR_CATEGORIES,
   type ErrorCategory,
 } from "@/api/types";
+import { ApiKeyInput } from "@/components/ApiKeyInput";
 import { AsyncState } from "@/components/AsyncState";
 import { type Column, DataTable } from "@/components/DataTable";
 import { errorCategoryColor, errorCategoryLabel, timeAgo } from "@/lib/format";
+import { useApiKey } from "@/state/apiKey";
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 
 function truncMid(s: string, head: number, tail: number): string {
   return s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
+}
+
+/**
+ * Normalize a thrown value into user-friendly text, with a special case for
+ * `ApiError(401)` — point the operator at the API key panel rather than
+ * showing the bare `unauthorized` response (S18 / M006).
+ */
+function describeError(err: unknown): string {
+  if (err instanceof ApiError && err.status === 401) {
+    return "Unauthorized — enter or re-enter your admin API key in the panel above (the current key may be unset or incorrect).";
+  }
+  return err instanceof ApiError ? err.message : String(err);
 }
 
 type FormErrorOk = { ok: true; body: CreateAlertSubscriptionBody };
@@ -36,6 +50,8 @@ type FormErrorBad = { ok: false; error: string };
  * 에서 폐기하고 mutation cache까지 `reset()`한다. 절대 URL/쿼리캐시/로그에 안 남김.
  */
 export function Alerts() {
+  const { apiKey } = useApiKey();
+  const writesDisabled = apiKey == null;
   const list = useAlertSubscriptions({ limit: 200 });
   const create = useCreateAlertSubscription();
   const rotate = useRotateAlertSubscription();
@@ -132,7 +148,7 @@ export function Alerts() {
       setThresholdWindowSecs("");
       setDebounceSecs("");
     } catch (err) {
-      setFormError(err instanceof ApiError ? err.message : String(err));
+      setFormError(describeError(err));
     }
   }
 
@@ -147,7 +163,7 @@ export function Alerts() {
       const resp = await rotate.mutateAsync(id);
       setRevealed(resp.data);
     } catch (err) {
-      window.alert(err instanceof ApiError ? err.message : String(err));
+      window.alert(describeError(err));
     }
   }
 
@@ -161,7 +177,7 @@ export function Alerts() {
     try {
       await deactivate.mutateAsync(id);
     } catch (err) {
-      window.alert(err instanceof ApiError ? err.message : String(err));
+      window.alert(describeError(err));
     }
   }
 
@@ -278,16 +294,18 @@ export function Alerts() {
           <button
             className="btn"
             type="button"
-            disabled={!s.active || rotate.isPending}
+            disabled={!s.active || rotate.isPending || writesDisabled}
             onClick={() => onRotate(s.subscription_id)}
+            title={writesDisabled ? "API key required (S16/M006)" : undefined}
           >
             Rotate
           </button>
           <button
             className="btn"
             type="button"
-            disabled={!s.active || deactivate.isPending}
+            disabled={!s.active || deactivate.isPending || writesDisabled}
             onClick={() => onDeactivate(s.subscription_id)}
+            title={writesDisabled ? "API key required (S16/M006)" : undefined}
           >
             Deactivate
           </button>
@@ -312,6 +330,8 @@ export function Alerts() {
           </span>
         </div>
       </div>
+
+      <ApiKeyInput />
 
       <div className="card">
         <div className="card-head">
@@ -445,8 +465,28 @@ export function Alerts() {
               {formError}
             </div>
           )}
+          {writesDisabled && (
+            <div
+              className="muted"
+              style={{
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                padding: 10,
+                borderRadius: 6,
+                fontSize: 13,
+              }}
+            >
+              Enter an admin API key above to enable Create / Rotate / Deactivate
+              (S16/M006).
+            </div>
+          )}
           <div>
-            <button className="btn" type="submit" disabled={create.isPending}>
+            <button
+              className="btn"
+              type="submit"
+              disabled={create.isPending || writesDisabled}
+              title={writesDisabled ? "API key required (S16/M006)" : undefined}
+            >
               {create.isPending ? "Creating…" : "Create subscription"}
             </button>
           </div>
