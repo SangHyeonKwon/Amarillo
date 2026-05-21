@@ -9,6 +9,8 @@
 //! 일관). 순수 SSRF·HMAC 단위 + 매칭 anti-join 통합테스트(`-p db --ignored`)가
 //! 1차 증빙, 실제 전송·폴백은 컴파일+clippy+수동 스모크·문서.
 
+use std::net::ToSocketAddrs;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -18,7 +20,7 @@ use sha2::Sha256;
 use sqlx::PgPool;
 
 use db::models::{AlertMatch, RateAlertMatch};
-use db::validators::webhook_url_is_safe;
+use db::validators::{ip_is_safe, webhook_url_is_safe};
 
 const USER_AGENT: &str = concat!("amarillo-alerts/", env!("CARGO_PKG_VERSION"));
 /// HMAC 본문 서명을 담을 헤더. 값 형식 `sha256=<hex>`.
@@ -37,6 +39,57 @@ const CLAIM_STALE_AFTER_SECS: i64 = 60;
 const MAX_CONCURRENT_POSTS: usize = 10;
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// DNS-time SSRF guard (HARDEN3 / D020).
+///
+/// reqwest의 `dns_resolver` hook으로 주입 — OS resolver(`to_socket_addrs`,
+/// blocking)로 hostname을 풀고, **각 resolved IP**를 [`ip_is_safe`]로 검증한다.
+/// unsafe IP가 하나라도 있으면 `Err` 반환 → reqwest connect 단계에서 실패.
+///
+/// DNS rebinding 공격 차단: 공격자가 *처음엔* 공개 IP를 반환해
+/// [`webhook_url_is_safe`]를 통과시키더라도, dispatcher가 send 직전에 resolve
+/// 다시 했을 때 사설 IP(`127.0.0.1` 등)가 나오면 본 가드가 차단한다.
+/// 정책은 [`ip_is_safe`] 단일 출처 — 파싱 시점과 DNS 시점이 *같은 규칙*을 공유.
+///
+/// 신규 의존 0 — stdlib `ToSocketAddrs`는 blocking이라 `spawn_blocking`으로
+/// 격리. dispatcher의 `MAX_CONCURRENT_POSTS=10` 범위에선 thread-pool 무부담.
+/// hickory-dns 같은 async resolver lib 미도입(D020).
+///
+/// **잔여 한계(정직)**: OS resolver의 *응답 캐싱 race*(커널 stub resolver /
+/// nscd)는 우리 코드 밖. 완전 차단은 hickory-dns의 직접 UDP resolution(별
+/// 단위, BACKLOG 자연 추적).
+#[derive(Debug)]
+struct SafeDnsResolver;
+
+impl reqwest::dns::Resolve for SafeDnsResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        Box::pin(async move {
+            let addrs = tokio::task::spawn_blocking(move || {
+                (host.as_str(), 0u16)
+                    .to_socket_addrs()
+                    .map(|iter| iter.collect::<Vec<_>>())
+            })
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+            for sa in &addrs {
+                if let Err(reason) = ip_is_safe(sa.ip()) {
+                    let msg = format!(
+                        "DNS-time SSRF guard: resolved IP {} rejected: {:?}",
+                        sa.ip(),
+                        reason
+                    );
+                    return Err(msg.into());
+                }
+            }
+
+            let iter: reqwest::dns::Addrs = Box::new(addrs.into_iter());
+            Ok(iter)
+        })
+    }
+}
 
 /// `HMAC-SHA256(secret, body)` → 소문자 hex 64자. 순수.
 ///
@@ -477,6 +530,7 @@ pub async fn dispatch_loop(pool: PgPool, poll: Duration) -> Result<()> {
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent(USER_AGENT)
+        .dns_resolver(Arc::new(SafeDnsResolver))
         .build()?;
     tracing::info!(
         poll_secs = poll.as_secs(),

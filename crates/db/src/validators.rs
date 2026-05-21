@@ -32,16 +32,72 @@ pub enum UnsafeUrlReason {
     MdnsHost,
 }
 
+/// 단일 IP 주소가 외부 webhook 대상으로 안전한지 **순수** 검증 (S08 + HARDEN3/D020).
+///
+/// `webhook_url_is_safe`(URL 파싱 시점)와 `SafeDnsResolver`(DNS resolve 시점)가
+/// **공유** — 정책 단일 출처. IPv4-mapped IPv6는 IPv4 규칙으로 펴낸 뒤 검증
+/// (리뷰 H1). 거부 분류: loopback / private (RFC1918) / link-local (169.254
+/// 메타데이터 포함) / unspecified / multicast / broadcast / IPv6 ULA (fc00::/7)
+/// / IPv6 link-local (fe80::/10).
+pub fn ip_is_safe(ip: IpAddr) -> Result<(), UnsafeUrlReason> {
+    use UnsafeUrlReason::*;
+    let v4_to_check: Option<std::net::Ipv4Addr> = match ip {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped(),
+    };
+    if let Some(v4) = v4_to_check {
+        if v4.is_loopback() {
+            return Err(LoopbackHost);
+        }
+        if v4.is_unspecified() {
+            return Err(UnspecifiedIp);
+        }
+        if v4.is_multicast() {
+            return Err(MulticastIp);
+        }
+        if v4.is_private() {
+            return Err(PrivateIp);
+        }
+        if v4.is_link_local() {
+            return Err(LinkLocalIp);
+        }
+        if v4.is_broadcast() {
+            return Err(BroadcastIp);
+        }
+        return Ok(());
+    }
+    // 순수 IPv6 (mapped 아닌)
+    if ip.is_loopback() {
+        return Err(LoopbackHost);
+    }
+    if ip.is_unspecified() {
+        return Err(UnspecifiedIp);
+    }
+    if ip.is_multicast() {
+        return Err(MulticastIp);
+    }
+    if let IpAddr::V6(v6) = ip {
+        let seg0 = v6.segments()[0];
+        if (seg0 & 0xfe00) == 0xfc00 {
+            return Err(UniqueLocalIp);
+        }
+        if (seg0 & 0xffc0) == 0xfe80 {
+            return Err(LinkLocalIp);
+        }
+    }
+    Ok(())
+}
+
 /// webhook URL이 외부로 안전하게 POST할 수 있는 형태인지 **순수** 검증 (S08).
 ///
 /// API의 입력 검증과 디스패처의 전송 직전 검증에서 **공유**된다(같은 규칙으로
 /// 박혀야 분기 회피 없음). 정책: ① `https` 스킴만 허용. ② IP 리터럴이면
-/// loopback/private(RFC1918)/link-local(169.254 메타데이터 포함)/unspecified/
-/// multicast/broadcast/IPv6 ULA·link-local 거부. ③ 호스트명이면 `localhost`/
-/// `*.localhost`/`*.local`(mDNS) 거부.
+/// [`ip_is_safe`] 규칙 적용. ③ 호스트명이면 `localhost`/`*.localhost`/`*.local`
+/// (mDNS) 거부.
 ///
-/// **잔여 리스크(정직)**: DNS 시점 IP 재바인딩(공격자가 사설 IP로 해석되는 도메인
-/// 등록)은 본 가드만으론 못 막는다 — 완전 해소는 연결 시점 IP 검사(backlog).
+/// **DNS 시점 IP 재바인딩**(공격자가 처음엔 공개 IP를 응답 후 connect 직전
+/// 사설 IP로 rebind)은 본 함수가 못 막지만, dispatcher의 `SafeDnsResolver`
+/// (HARDEN3/D020)가 resolve 시점에 `ip_is_safe`를 다시 적용해 차단한다.
 /// 디스패처는 `reqwest::Policy::none()`로 리다이렉트 비추적해 한 단계 우회 차단.
 pub fn webhook_url_is_safe(input: &str) -> Result<(), UnsafeUrlReason> {
     use UnsafeUrlReason::*;
@@ -60,54 +116,7 @@ pub fn webhook_url_is_safe(input: &str) -> Result<(), UnsafeUrlReason> {
         .and_then(|s| s.strip_suffix(']'))
         .unwrap_or(host_raw);
     if let Ok(ip) = IpAddr::from_str(host) {
-        // IPv6 분기에서 IPv4-mapped(`::ffff:a.b.c.d`)를 먼저 펴낸 뒤 IPv4 규칙
-        // 적용 — `IpAddr::is_loopback`/`Ipv6Addr` 마스크는 mapped 형태를 못 잡아
-        // `https://[::ffff:127.0.0.1]/x` 같은 우회가 생긴다(리뷰 H1).
-        let v4_to_check: Option<std::net::Ipv4Addr> = match ip {
-            IpAddr::V4(v4) => Some(v4),
-            IpAddr::V6(v6) => v6.to_ipv4_mapped(),
-        };
-        if let Some(v4) = v4_to_check {
-            if v4.is_loopback() {
-                return Err(LoopbackHost);
-            }
-            if v4.is_unspecified() {
-                return Err(UnspecifiedIp);
-            }
-            if v4.is_multicast() {
-                return Err(MulticastIp);
-            }
-            if v4.is_private() {
-                return Err(PrivateIp);
-            }
-            if v4.is_link_local() {
-                return Err(LinkLocalIp);
-            }
-            if v4.is_broadcast() {
-                return Err(BroadcastIp);
-            }
-            return Ok(());
-        }
-        // 순수 IPv6 (mapped 아닌)
-        if ip.is_loopback() {
-            return Err(LoopbackHost);
-        }
-        if ip.is_unspecified() {
-            return Err(UnspecifiedIp);
-        }
-        if ip.is_multicast() {
-            return Err(MulticastIp);
-        }
-        if let IpAddr::V6(v6) = ip {
-            let seg0 = v6.segments()[0];
-            if (seg0 & 0xfe00) == 0xfc00 {
-                return Err(UniqueLocalIp);
-            }
-            if (seg0 & 0xffc0) == 0xfe80 {
-                return Err(LinkLocalIp);
-            }
-        }
-        return Ok(());
+        return ip_is_safe(ip);
     }
     let host_lower = host.to_ascii_lowercase();
     if host_lower == "localhost"
@@ -282,5 +291,56 @@ mod tests {
         assert!(webhook_url_is_safe("https://api.example.test/v1/alerts").is_ok());
         assert!(webhook_url_is_safe("https://8.8.8.8/x").is_ok());
         assert!(webhook_url_is_safe("https://[2001:db8::1]/x").is_ok());
+    }
+
+    // HARDEN3 / D020 — `ip_is_safe`는 `webhook_url_is_safe`와 dispatcher의
+    // `SafeDnsResolver` 양쪽이 공유하는 정책 단일 출처. 직접 호출 테스트로
+    // 두 진입점이 *같은 룰*을 보고 있음을 명시한다.
+
+    #[test]
+    fn ip_is_safe_accepts_public_ipv4_and_ipv6() {
+        assert!(ip_is_safe(IpAddr::from_str("8.8.8.8").unwrap()).is_ok());
+        assert!(ip_is_safe(IpAddr::from_str("1.1.1.1").unwrap()).is_ok());
+        assert!(ip_is_safe(IpAddr::from_str("2001:db8::1").unwrap()).is_ok());
+    }
+
+    #[test]
+    fn ip_is_safe_rejects_loopback_private_link_local() {
+        assert_eq!(
+            ip_is_safe(IpAddr::from_str("127.0.0.1").unwrap()),
+            Err(UnsafeUrlReason::LoopbackHost)
+        );
+        assert_eq!(
+            ip_is_safe(IpAddr::from_str("10.0.0.1").unwrap()),
+            Err(UnsafeUrlReason::PrivateIp)
+        );
+        assert_eq!(
+            ip_is_safe(IpAddr::from_str("169.254.169.254").unwrap()),
+            Err(UnsafeUrlReason::LinkLocalIp)
+        );
+        assert_eq!(
+            ip_is_safe(IpAddr::from_str("::1").unwrap()),
+            Err(UnsafeUrlReason::LoopbackHost)
+        );
+        assert_eq!(
+            ip_is_safe(IpAddr::from_str("fd00::1").unwrap()),
+            Err(UnsafeUrlReason::UniqueLocalIp)
+        );
+    }
+
+    #[test]
+    fn ip_is_safe_unwraps_ipv4_mapped_ipv6() {
+        // ::ffff:127.0.0.1 → IPv4 loopback (리뷰 H1 회귀, dispatcher의
+        // SafeDnsResolver도 같은 정책)
+        assert_eq!(
+            ip_is_safe(IpAddr::from_str("::ffff:127.0.0.1").unwrap()),
+            Err(UnsafeUrlReason::LoopbackHost)
+        );
+        assert_eq!(
+            ip_is_safe(IpAddr::from_str("::ffff:169.254.169.254").unwrap()),
+            Err(UnsafeUrlReason::LinkLocalIp)
+        );
+        // 매핑된 공개 IP는 그대로 허용
+        assert!(ip_is_safe(IpAddr::from_str("::ffff:8.8.8.8").unwrap()).is_ok());
     }
 }
