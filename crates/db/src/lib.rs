@@ -8,6 +8,11 @@ pub mod models;
 pub mod queries;
 pub mod validators;
 
+/// S11.1 — `decoder::abi`를 db crate 경계에서 re-export. api 핸들러가 `db::abi::
+/// decode_args` 형태로 호출하도록 — db가 wire schema의 단일 출처이므로 ABI 디코딩
+/// 헬퍼도 같은 경계 뒤에 배치하면 호출처 의존 그래프가 단순해진다.
+pub use decoder::abi;
+
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 

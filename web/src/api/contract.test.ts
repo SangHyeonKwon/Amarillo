@@ -117,6 +117,7 @@ describe("api/contract", () => {
         call_tree_truncated: true,
         root_cause: null,
         failing_function_decoded: null,
+        root_cause_decoded: null,
         diagnosis: null,
       },
     });
@@ -175,6 +176,7 @@ describe("api/contract", () => {
           trace_id: 4,
         },
         failing_function_decoded: null,
+        root_cause_decoded: null,
         diagnosis: null,
       },
     });
@@ -262,7 +264,9 @@ describe("api/contract", () => {
           name: "transfer",
           signature: "transfer(address,uint256)",
           source: "erc20",
+          args: null,
         },
+        root_cause_decoded: null,
         diagnosis: null,
       },
     });
@@ -317,10 +321,152 @@ describe("api/contract", () => {
             name: 12345, // not a string
             signature: "transfer(address,uint256)",
             source: "erc20",
+            args: null,
           },
+          root_cause_decoded: null,
         },
       }),
     ).toThrow(/name/);
+  });
+
+  // ── S11.1: ABI args decoding + root_cause_decoded ──────────────
+
+  it("failed-tx detail parses DecodedFunction.args with typed values", () => {
+    const parsed = parseFailedTxDetailEnvelope({
+      data: {
+        failed: {
+          tx_hash: "0xdead",
+          error_category: "Unknown",
+          revert_reason: null,
+          failing_function: "0xa9059cbb",
+          gas_used: 21000,
+          timestamp: "2025-01-01T00:00:00Z",
+        },
+        call_tree: [],
+        call_tree_truncated: false,
+        root_cause: null,
+        failing_function_decoded: {
+          selector: "0xa9059cbb",
+          name: "transfer",
+          signature: "transfer(address,uint256)",
+          source: "erc20",
+          args: [
+            { type: "address", value: "0xabc0000000000000000000000000000000000def" },
+            // uint256 lowered to a *decimal string* (precision-safe in JS).
+            { type: "uint256", value: "1000000000000000000" },
+          ],
+        },
+        root_cause_decoded: null,
+        diagnosis: null,
+      },
+    });
+    const args = parsed.data.failing_function_decoded!.args;
+    expect(args).not.toBeNull();
+    expect(args).toHaveLength(2);
+    expect(args![0].type).toBe("address");
+    expect(args![0].value).toBe("0xabc0000000000000000000000000000000000def");
+    expect(args![1].type).toBe("uint256");
+    // Verify the parser keeps numeric values as strings (no implicit Number()).
+    expect(typeof args![1].value).toBe("string");
+    expect(args![1].value).toBe("1000000000000000000");
+  });
+
+  it("failed-tx detail parses root_cause_decoded with selector matching root_cause.input", () => {
+    const parsed = parseFailedTxDetailEnvelope({
+      data: {
+        failed: {
+          tx_hash: "0xdead",
+          error_category: "SlippageExceeded",
+          revert_reason: null,
+          failing_function: "0x414bf389",
+          gas_used: 21000,
+          timestamp: "2025-01-01T00:00:00Z",
+        },
+        call_tree: [],
+        call_tree_truncated: false,
+        root_cause: {
+          tx_hash: "0xdead",
+          call_depth: 2,
+          call_type: "CALL",
+          from_addr: "0x01",
+          to_addr: "0x02",
+          value: "0",
+          gas_used: 500,
+          input: "0x095ea7b3000000000000000000000000abc0000000000000000000000000000000000def0000000000000000000000000000000000000000000000000de0b6b3a7640000",
+          output: null,
+          error: "ERC20: insufficient allowance",
+          trace_id: 7,
+        },
+        failing_function_decoded: null,
+        root_cause_decoded: {
+          // First 4 bytes of root_cause.input.
+          selector: "0x095ea7b3",
+          name: "approve",
+          signature: "approve(address,uint256)",
+          source: "erc20",
+          args: null, // null args (decode miss) still permitted — D027.
+        },
+        diagnosis: null,
+      },
+    });
+    expect(parsed.data.root_cause_decoded).not.toBeNull();
+    expect(parsed.data.root_cause_decoded!.name).toBe("approve");
+    // Self-consistency: selector equals first 4 bytes of root_cause.input.
+    const rcInput = parsed.data.root_cause!.input!;
+    const expected = "0x" + rcInput.replace(/^0x/, "").slice(0, 8).toLowerCase();
+    expect(parsed.data.root_cause_decoded!.selector).toBe(expected);
+  });
+
+  it("failed-tx detail rejects missing root_cause_decoded key (silent default forbidden)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: null,
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          root_cause: null,
+          failing_function_decoded: null,
+          // root_cause_decoded intentionally omitted
+          diagnosis: null,
+        },
+      }),
+    ).toThrow(/root_cause_decoded/);
+  });
+
+  it("DecodedFunction rejects missing args key (silent default forbidden)", () => {
+    expect(() =>
+      parseFailedTxDetailEnvelope({
+        data: {
+          failed: {
+            tx_hash: "0x1",
+            error_category: "Unknown",
+            revert_reason: null,
+            failing_function: "0xa9059cbb",
+            gas_used: 1,
+            timestamp: "2025-01-01T00:00:00Z",
+          },
+          call_tree: [],
+          call_tree_truncated: false,
+          root_cause: null,
+          failing_function_decoded: {
+            selector: "0xa9059cbb",
+            name: "transfer",
+            signature: "transfer(address,uint256)",
+            source: "erc20",
+            // args intentionally omitted — parser must reject (must be null or array)
+          },
+          root_cause_decoded: null,
+          diagnosis: null,
+        },
+      }),
+    ).toThrow(/args/);
   });
 
   // ── S12 / M004: diagnosis ─────────────────────────────────────
@@ -340,6 +486,7 @@ describe("api/contract", () => {
         call_tree_truncated: false,
         root_cause: null,
         failing_function_decoded: null,
+        root_cause_decoded: null,
         diagnosis: {
           message: "Trade output was below the minimum acceptable amount.",
           recommended_action: "Increase slippage tolerance.",
@@ -371,6 +518,7 @@ describe("api/contract", () => {
           call_tree_truncated: false,
           root_cause: null,
           failing_function_decoded: null,
+          root_cause_decoded: null,
           // diagnosis intentionally omitted
         },
       }),
@@ -393,6 +541,7 @@ describe("api/contract", () => {
           call_tree_truncated: false,
           root_cause: null,
           failing_function_decoded: null,
+          root_cause_decoded: null,
           diagnosis: {
             message: 12345, // not a string
             recommended_action: null,

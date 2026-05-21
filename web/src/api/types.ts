@@ -139,6 +139,16 @@ export interface TraceLog {
  * ABI seed into a human-readable function name/signature. ABI args decoding is a
  * separate slice (S11.1 sketch, D015).
  */
+export interface DecodedArg {
+  /** Solidity type string verbatim from the signature (e.g. `address`, `uint256`,
+   *  or `(address,uint24,uint256)` for a nested tuple). */
+  type: string;
+  /** JSON-lowered value — `address` / `bytes` → `0x…` hex, `uint*`/`int*` →
+   *  decimal **string** (precision-safe), `bool` → boolean, tuple/array →
+   *  nested JSON array. See docs/api-failed-tx.md#abi-args-decoding-s111. */
+  value: unknown;
+}
+
 export interface DecodedFunction {
   /** Lowercased `0x` + 8 hex (matches `data.failed.failing_function`). */
   selector: string;
@@ -148,6 +158,14 @@ export interface DecodedFunction {
   signature: string;
   /** Seed origin (`erc20` | `uniswap-v3-router` | …); `null` when not tagged. */
   source: string | null;
+  /**
+   * S11.1 — typed argument values decoded from the call's input bytes.
+   * `null` is explicit (D027): either decoding was *not attempted* (no input,
+   * input shorter than 4 bytes) or it *failed* (length mismatch, malformed
+   * dynamic offsets, …). The surrounding object stays populated — name +
+   * signature is still useful diagnostic data on an args miss.
+   */
+  args: DecodedArg[] | null;
 }
 
 /**
@@ -181,10 +199,22 @@ export interface FailedTxDetail {
   /**
    * `data.failed.failing_function` (4-byte selector) resolved against the
    * self-owned `function_signature` ABI seed (S11 / M004). `null` is explicit
-   * — either the selector itself was `null`, or no seed row matched. Args
-   * decoding is deliberately out of scope (D015).
+   * — either the selector itself was `null`, or no seed row matched.
+   * S11.1: `DecodedFunction.args` carries the typed arg values (null on
+   * decode miss; the object itself stays populated — D027).
    */
   failing_function_decoded: DecodedFunction | null;
+  /**
+   * S11.1 — the same shape as `failing_function_decoded`, but keyed on
+   * `root_cause.input` instead of the top-level call. Useful when the
+   * revert originated in a sub-call whose function differs from the
+   * transaction's outer signature (e.g. an outer `swap` whose nested
+   * `transfer` reverted). `null` covers three cases: `root_cause` is
+   * `null`, `root_cause.input` is `null`, or the selector isn't in the seed.
+   * The `selector` field always equals the first 4 bytes of
+   * `root_cause.input` (lowercased) when non-null.
+   */
+  root_cause_decoded: DecodedFunction | null;
   /**
    * `data.failed.error_category` resolved against the `category_diagnosis`
    * seed (S12 / M004) — message + recommended_action for the dApp developer.

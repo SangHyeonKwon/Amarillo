@@ -138,7 +138,77 @@ if [ "$gc" = 200 ]; then
       if (typeof fd.signature !== "string" || !fd.signature.length) {
         console.log("  DECODED FAIL: signature must be non-empty string"); process.exit(1);
       }
-      console.log("  DECODED OK (" + fd.name + " :: " + fd.signature + ")");
+      // S11.1 — args is either null (decode skipped / failed) or an array of
+      // { type: string, value: any }. Each top-level type token from the
+      // signature must show up positionally in `args[i].type` when present.
+      if (!Object.prototype.hasOwnProperty.call(fd, "args")) {
+        console.log("  DECODED FAIL: args field missing (S11.1 — must be null or array, not absent)");
+        process.exit(1);
+      }
+      if (fd.args !== null) {
+        if (!Array.isArray(fd.args)) {
+          console.log("  DECODED FAIL: args must be null or array, got " + typeof fd.args);
+          process.exit(1);
+        }
+        for (const a of fd.args) {
+          if (typeof a !== "object" || a === null) {
+            console.log("  DECODED FAIL: arg element must be object"); process.exit(1);
+          }
+          if (typeof a.type !== "string" || !a.type.length) {
+            console.log("  DECODED FAIL: arg.type must be non-empty string"); process.exit(1);
+          }
+          if (!("value" in a)) {
+            console.log("  DECODED FAIL: arg.value missing"); process.exit(1);
+          }
+        }
+      }
+      console.log("  DECODED OK (" + fd.name + " :: " + fd.signature +
+        (fd.args === null ? "; args=null" : "; args=" + fd.args.length + " typed") + ")");
+    }
+  ' || fail=1
+fi
+
+# Assert root_cause_decoded semantics (S11.1) — null or DecodedFunction object
+# whose selector equals the first 4 bytes of root_cause.input (lowercased).
+# Args are validated with the same shape rules as failing_function_decoded.
+if [ "$gc" = 200 ]; then
+  node -e '
+    const j = require("/tmp/vftx-good.json");
+    const d = j.data || {};
+    if (!Object.prototype.hasOwnProperty.call(d, "root_cause_decoded")) {
+      console.log("  ROOT_DECODED FAIL: field missing (S11.1 — must be null or object, not absent)");
+      process.exit(1);
+    }
+    const rd = d.root_cause_decoded;
+    if (rd === null) {
+      console.log("  ROOT_DECODED OK (null — root_cause/input absent or selector unseeded)");
+    } else if (typeof rd !== "object") {
+      console.log("  ROOT_DECODED FAIL: must be null or object, got " + typeof rd);
+      process.exit(1);
+    } else {
+      const rcInput = d.root_cause && d.root_cause.input;
+      if (typeof rcInput !== "string" || rcInput.length < 10) {
+        console.log("  ROOT_DECODED FAIL: object present but root_cause.input is missing/too short");
+        process.exit(1);
+      }
+      // First 4 bytes of input (8 hex chars after 0x) must match selector.
+      const expected = "0x" + rcInput.replace(/^0x/, "").slice(0, 8).toLowerCase();
+      if (rd.selector !== expected) {
+        console.log("  ROOT_DECODED FAIL: selector " + rd.selector + " vs expected " + expected);
+        process.exit(1);
+      }
+      if (typeof rd.name !== "string" || !rd.name.length ||
+          typeof rd.signature !== "string" || !rd.signature.length) {
+        console.log("  ROOT_DECODED FAIL: name/signature must be non-empty");
+        process.exit(1);
+      }
+      if (!Object.prototype.hasOwnProperty.call(rd, "args")) {
+        console.log("  ROOT_DECODED FAIL: args field missing"); process.exit(1);
+      }
+      if (rd.args !== null && !Array.isArray(rd.args)) {
+        console.log("  ROOT_DECODED FAIL: args must be null or array"); process.exit(1);
+      }
+      console.log("  ROOT_DECODED OK (" + rd.name + " :: " + rd.signature + ")");
     }
   ' || fail=1
 fi

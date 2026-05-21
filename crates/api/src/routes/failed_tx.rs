@@ -41,13 +41,58 @@ pub async fn get_failed_tx(
     }
     let root_cause = db::queries::get_first_error_frame(&pool, &tx_hash).await?;
 
-    // S11 / M004: failing_function (selector) → 사람이 읽는 이름/시그니처 lookup.
-    // `failing_function`이 None이거나 selector 매칭이 없으면 명시 `null` (silent
-    // default 금지 — D014/D015 일관).
+    // S11 / M004 + S11.1: failing_function (selector) → 이름/시그니처 lookup +
+    // root frame input bytes에서 args 디코드(D027 — 실패 시 args=None, 객체 자체는
+    // 살려둠).
     let failing_function_decoded = match failed.failing_function.as_deref() {
-        Some(selector) => db::queries::get_function_signature(&pool, selector)
-            .await?
-            .map(db::models::DecodedFunction::from),
+        Some(selector) => match db::queries::get_function_signature(&pool, selector).await? {
+            Some(fs) => {
+                let signature = fs.signature.clone();
+                let mut decoded: db::models::DecodedFunction = fs.into();
+                // root frame input = `call_depth == 0`인 첫 frame의 input (pre-order
+                // DFS이므로 list 첫 원소가 보통 root이지만 명시 lookup으로 안전).
+                if let Some(root_input) = call_tree
+                    .iter()
+                    .find(|f| f.call_depth == 0)
+                    .and_then(|f| f.input.as_deref())
+                {
+                    match db::abi::decode_args(&signature, root_input) {
+                        Ok(args) => decoded.args = Some(args),
+                        Err(e) => tracing::debug!(
+                            tx_hash = %tx_hash, error = %e,
+                            "abi decode failed for failing_function args"
+                        ),
+                    }
+                }
+                Some(decoded)
+            }
+            None => None,
+        },
+        None => None,
+    };
+
+    // S11.1: root_cause.input의 첫 4바이트 → selector lookup → DecodedFunction
+    // 합성 + args 디코드. `root_cause`, `input`, 시드 매칭 중 하나라도 없으면
+    // 명시 `null` (D027/D014 일관).
+    let root_cause_decoded = match root_cause.as_ref().and_then(|rc| rc.input.as_deref()) {
+        Some(input_hex) => match extract_selector(input_hex) {
+            Some(selector) => match db::queries::get_function_signature(&pool, &selector).await? {
+                Some(fs) => {
+                    let signature = fs.signature.clone();
+                    let mut decoded: db::models::DecodedFunction = fs.into();
+                    match db::abi::decode_args(&signature, input_hex) {
+                        Ok(args) => decoded.args = Some(args),
+                        Err(e) => tracing::debug!(
+                            tx_hash = %tx_hash, error = %e,
+                            "abi decode failed for root_cause args"
+                        ),
+                    }
+                    Some(decoded)
+                }
+                None => None,
+            },
+            None => None,
+        },
         None => None,
     };
 
@@ -65,9 +110,20 @@ pub async fn get_failed_tx(
             call_tree_truncated,
             root_cause,
             failing_function_decoded,
+            root_cause_decoded,
             diagnosis,
         },
     }))
+}
+
+/// Pull the 4-byte selector (`0x` + 8 lowercase hex) from a raw input hex
+/// string. Returns `None` if the input is too short to host a selector.
+fn extract_selector(input_hex: &str) -> Option<String> {
+    let stripped = input_hex.strip_prefix("0x").unwrap_or(input_hex);
+    if stripped.len() < 8 {
+        return None;
+    }
+    Some(format!("0x{}", stripped[..8].to_lowercase()))
 }
 
 /// `GET /v1/failed-tx` 쿼리 파라미터.
