@@ -18,11 +18,16 @@ fn liquidity_type_to_sql(t: &LiquidityEventType) -> &'static str {
     }
 }
 
-/// PostgreSQL enum 값으로 변환하는 헬퍼.
+/// PostgreSQL enum 값으로 변환하는 헬퍼. ErrorCategory의 SCREAMING_SNAKE 와이어
+/// 표현과 1:1 매핑되며, S12.1에서 가산된 4 세부 변형도 포함한다 (D028 일관).
 fn error_category_to_sql(c: &ErrorCategory) -> &'static str {
     match c {
         ErrorCategory::InsufficientBalance => "INSUFFICIENT_BALANCE",
+        ErrorCategory::InsufficientAllowance => "INSUFFICIENT_ALLOWANCE",
         ErrorCategory::SlippageExceeded => "SLIPPAGE_EXCEEDED",
+        ErrorCategory::SlippageAmountOut => "SLIPPAGE_AMOUNT_OUT",
+        ErrorCategory::SlippageAmountIn => "SLIPPAGE_AMOUNT_IN",
+        ErrorCategory::SlippagePriceImpact => "SLIPPAGE_PRICE_IMPACT",
         ErrorCategory::DeadlineExpired => "DEADLINE_EXPIRED",
         ErrorCategory::Unauthorized => "UNAUTHORIZED",
         ErrorCategory::TransferFailed => "TRANSFER_FAILED",

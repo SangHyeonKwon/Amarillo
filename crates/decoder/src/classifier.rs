@@ -7,10 +7,19 @@
 ///
 /// 반환 값은 `db::models::ErrorCategory` enum과 매칭되는 문자열이다.
 /// decoder 크레이트가 db에 의존하지 않으므로 문자열로 반환한다.
+///
+/// S12.1 룰 우선순위 (D030): *더 구체적인 세부 카테고리를 먼저 매칭*하고,
+/// 미매칭 시 *기존 generic 카테고리로 fallback*. 세부 매칭이 *없을 때만*
+/// fallback이 실행되도록 순서를 유지해야 한다. 신규 트랜잭션은 우선
+/// 세부 카테고리로 분류된다.
 pub fn classify_error(revert_reason: &str) -> &'static str {
     let lower = revert_reason.to_lowercase();
 
-    // 잔액 부족
+    // 잔액 부족 계열 — S12.1 세부 우선
+    //   "allowance" → ERC-20 approve 부족 (진단 메시지 완전 다름: approve를 호출)
+    if lower.contains("allowance") {
+        return "INSUFFICIENT_ALLOWANCE";
+    }
     if lower.contains("stf")
         || lower.contains("insufficient")
         || lower.contains("balance")
@@ -20,13 +29,21 @@ pub fn classify_error(revert_reason: &str) -> &'static str {
         return "INSUFFICIENT_BALANCE";
     }
 
-    // 슬리피지 초과
-    if lower.contains("too little received")
-        || lower.contains("too much requested")
-        || lower.contains("slippage")
-        || lower.contains("price slipped")
-        || lower.contains("amount out")
-    {
+    // 슬리피지 계열 — S12.1 세부 우선
+    //   "too little received" → 매수 슬리피지 (amountOut 부족)
+    //   "too much requested"  → 매도 슬리피지 (amountIn 한도 초과)
+    //   "price slipped" / "amount out" → 풀 가격 영향 한도 초과
+    //   그 외 일반 "slippage" 키워드만 → generic SLIPPAGE_EXCEEDED fallback
+    if lower.contains("too little received") {
+        return "SLIPPAGE_AMOUNT_OUT";
+    }
+    if lower.contains("too much requested") {
+        return "SLIPPAGE_AMOUNT_IN";
+    }
+    if lower.contains("price slipped") || lower.contains("amount out") {
+        return "SLIPPAGE_PRICE_IMPACT";
+    }
+    if lower.contains("slippage") {
         return "SLIPPAGE_EXCEEDED";
     }
 
@@ -78,10 +95,66 @@ mod tests {
         );
     }
 
+    // S12.1 — INSUFFICIENT_ALLOWANCE는 INSUFFICIENT_BALANCE의 *별개 카테고리*. approve를
+    // 호출해야 한다는 진단 메시지가 완전 다름.
     #[test]
-    fn test_classify_slippage() {
-        assert_eq!(classify_error("Too little received"), "SLIPPAGE_EXCEEDED");
-        assert_eq!(classify_error("Too much requested"), "SLIPPAGE_EXCEEDED");
+    fn test_classify_insufficient_allowance() {
+        assert_eq!(
+            classify_error("ERC20: insufficient allowance"),
+            "INSUFFICIENT_ALLOWANCE"
+        );
+        assert_eq!(
+            classify_error("transfer amount exceeds allowance"),
+            "INSUFFICIENT_ALLOWANCE"
+        );
+        // "allowance" 키워드는 "balance"보다 더 *구체적*이라 우선 매칭 — 룰 순서가
+        // 깨지면 INSUFFICIENT_BALANCE로 떨어질 위험. 회귀 가드.
+        assert_eq!(
+            classify_error("Insufficient allowance to transfer this amount"),
+            "INSUFFICIENT_ALLOWANCE"
+        );
+    }
+
+    // S12.1 — SLIPPAGE는 4개 세부 카테고리 + generic fallback. 컨트랙트가 공백을
+    // 쓰는 형태("Too little received") 기준으로 매칭 — D015 자기시드 정신 일관이라
+    // 운영자가 UPPER_SNAKE 변형(`TOO_LITTLE_RECEIVED`)을 만나면 룰을 추가하는 흐름.
+    #[test]
+    fn test_classify_slippage_amount_out() {
+        assert_eq!(classify_error("Too little received"), "SLIPPAGE_AMOUNT_OUT");
+        assert_eq!(
+            classify_error("UniswapV2Router: too little received"),
+            "SLIPPAGE_AMOUNT_OUT"
+        );
+    }
+
+    #[test]
+    fn test_classify_slippage_amount_in() {
+        assert_eq!(classify_error("Too much requested"), "SLIPPAGE_AMOUNT_IN");
+        assert_eq!(
+            classify_error("router: too much requested"),
+            "SLIPPAGE_AMOUNT_IN"
+        );
+    }
+
+    #[test]
+    fn test_classify_slippage_price_impact() {
+        assert_eq!(
+            classify_error("UniswapV3Pool: price slipped past the limit"),
+            "SLIPPAGE_PRICE_IMPACT"
+        );
+        assert_eq!(
+            classify_error("amount out is too low"),
+            "SLIPPAGE_PRICE_IMPACT"
+        );
+    }
+
+    // generic slippage fallback — 세부 키워드 없이 단순 "slippage"만 등장.
+    #[test]
+    fn test_classify_slippage_generic_fallback() {
+        assert_eq!(
+            classify_error("Generic slippage occurred"),
+            "SLIPPAGE_EXCEEDED"
+        );
     }
 
     #[test]

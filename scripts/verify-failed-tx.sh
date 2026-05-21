@@ -219,8 +219,12 @@ fi
 if [ "$gc" = 200 ]; then
   node -e '
     const SEEDED = new Set([
+      // 기존 6 카테고리
       "INSUFFICIENT_BALANCE", "SLIPPAGE_EXCEEDED", "DEADLINE_EXPIRED",
       "UNAUTHORIZED", "TRANSFER_FAILED", "UNKNOWN",
+      // S12.1 신규 4 세부 카테고리 — 마이그레이션 20240109의 시드 행이 보장
+      "INSUFFICIENT_ALLOWANCE", "SLIPPAGE_AMOUNT_OUT",
+      "SLIPPAGE_AMOUNT_IN", "SLIPPAGE_PRICE_IMPACT",
     ]);
     // Serde may emit the variant name ("Unknown") or the wire form
     // ("UNKNOWN") depending on enum tagging. Canonicalize for the check.

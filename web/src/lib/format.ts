@@ -97,7 +97,13 @@ export function timeAgo(iso: string): string {
 
 const ERROR_LABELS: Record<ErrorCategory, string> = {
   INSUFFICIENT_BALANCE: "Insufficient balance",
+  // S12.1 — 세부 카테고리는 부모(SLIPPAGE_EXCEEDED / INSUFFICIENT_BALANCE)의 *맥락
+  // 추가* 라벨. 차트 레전드에서 그룹화하기 쉽게 prefix 유지.
+  INSUFFICIENT_ALLOWANCE: "Insufficient allowance",
   SLIPPAGE_EXCEEDED: "Slippage exceeded",
+  SLIPPAGE_AMOUNT_OUT: "Slippage (amount out)",
+  SLIPPAGE_AMOUNT_IN: "Slippage (amount in)",
+  SLIPPAGE_PRICE_IMPACT: "Slippage (price impact)",
   DEADLINE_EXPIRED: "Deadline expired",
   UNAUTHORIZED: "Unauthorized",
   TRANSFER_FAILED: "Transfer failed",
@@ -108,10 +114,15 @@ export function errorCategoryLabel(category: ErrorCategory): string {
   return ERROR_LABELS[category] ?? category;
 }
 
-/** Stable color per error category for charts/legends. */
+/** Stable color per error category for charts/legends. S12.1 세부 카테고리는
+ *  부모 색상과 *근접한 변형*으로 — 차트 레전드에서 인지적 그룹 유지. */
 const ERROR_COLORS: Record<ErrorCategory, string> = {
   INSUFFICIENT_BALANCE: "#F66061",
+  INSUFFICIENT_ALLOWANCE: "#FF8989", // balance 계열 (붉은색 변형)
   SLIPPAGE_EXCEEDED: "#F4BD50",
+  SLIPPAGE_AMOUNT_OUT: "#FFD580", // slippage 계열 (노랑 변형, 밝게)
+  SLIPPAGE_AMOUNT_IN: "#E5A93D", // slippage 계열 (노랑 변형, 진하게)
+  SLIPPAGE_PRICE_IMPACT: "#C99232", // slippage 계열 (노랑/주황 경계)
   DEADLINE_EXPIRED: "#E88957",
   UNAUTHORIZED: "#C981E6",
   TRANSFER_FAILED: "#E06D6E",

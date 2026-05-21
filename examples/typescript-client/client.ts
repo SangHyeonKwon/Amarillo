@@ -13,10 +13,21 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 // ── Wire types (mirror `crates/db/src/models.rs` Serialize output) ────────
 
-/** `failed_transaction.error_category` — SCREAMING_SNAKE_CASE on the wire. */
+/** `failed_transaction.error_category` — SCREAMING_SNAKE_CASE on the wire.
+ *
+ * S12.1: four additive sub-categories live next to the original six. The
+ * generic categories (`SLIPPAGE_EXCEEDED`, `INSUFFICIENT_BALANCE`) stay as
+ * fallbacks so historical data classified before the subdivision survives
+ * (PostgreSQL `ALTER TYPE ... DROP VALUE` is restricted). New transactions
+ * land on the more specific category whenever the classifier matches a
+ * sub-pattern. See docs/api-failed-tx.md for the table. */
 export type ErrorCategory =
   | "INSUFFICIENT_BALANCE"
+  | "INSUFFICIENT_ALLOWANCE"
   | "SLIPPAGE_EXCEEDED"
+  | "SLIPPAGE_AMOUNT_OUT"
+  | "SLIPPAGE_AMOUNT_IN"
+  | "SLIPPAGE_PRICE_IMPACT"
   | "DEADLINE_EXPIRED"
   | "UNAUTHORIZED"
   | "TRANSFER_FAILED"

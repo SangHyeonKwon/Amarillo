@@ -23,7 +23,16 @@ from typing import Any, Dict, List, Optional
 
 # ── Wire types ────────────────────────────────────────────────────────
 
-ErrorCategory = str  # "INSUFFICIENT_BALANCE" | ... | "UNKNOWN"
+# `failed_transaction.error_category` — SCREAMING_SNAKE_CASE on the wire.
+# S12.1 adds four additive sub-categories next to the original six. The
+# generics (SLIPPAGE_EXCEEDED / INSUFFICIENT_BALANCE) stay as fallbacks so
+# historical data classified before the subdivision survives intact.
+# Allowed values (10 total):
+#   "INSUFFICIENT_BALANCE", "INSUFFICIENT_ALLOWANCE",
+#   "SLIPPAGE_EXCEEDED", "SLIPPAGE_AMOUNT_OUT", "SLIPPAGE_AMOUNT_IN",
+#   "SLIPPAGE_PRICE_IMPACT",
+#   "DEADLINE_EXPIRED", "UNAUTHORIZED", "TRANSFER_FAILED", "UNKNOWN"
+ErrorCategory = str
 
 
 @dataclass(frozen=True)
