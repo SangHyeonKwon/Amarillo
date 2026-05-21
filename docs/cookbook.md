@@ -1,0 +1,268 @@
+# Amarillo cookbook
+
+Three end-to-end scenarios against the Amarillo Failure Intelligence API,
+shown side by side in `curl`, TypeScript (via [`examples/typescript-client/`](../examples/typescript-client/)),
+and Python (via [`examples/python-client/`](../examples/python-client/)). Both
+example clients are stdlib-only — copy them straight into your project; no
+`npm install`, no `pip install`.
+
+The full endpoint contract reference lives in [`api-failed-tx.md`](api-failed-tx.md)
+and [`api-alerts.md`](api-alerts.md). This file is about *using* it.
+
+---
+
+## 1. Single-tx diagnosis
+
+The flagship question: "this hash failed — *where, what, why, and what should
+I do?*" M001~M003 (data / real-time / actionable alerts) plus M004 (depth —
+S10 `root_cause` + S11 `failing_function_decoded` + S12 `diagnosis`) all
+converge on one endpoint.
+
+### curl
+
+```bash
+curl -s http://localhost:3000/v1/failed-tx/0xdead000000000000000000000000000000000000000000000000000000000001 | jq
+```
+
+Response (S10/S11/S12 additive on top of the M001 base):
+
+```jsonc
+{
+  "data": {
+    "failed": {
+      "tx_hash": "0xdead…0001",
+      "error_category": "Unknown",
+      "revert_reason": null,
+      "failing_function": "0xa9059cbb",
+      "gas_used": 45000,
+      "timestamp": "2023-09-01T12:00:00Z"
+    },
+    "call_tree": [ /* … pre-order DFS, trace_id ASC */ ],
+    "call_tree_truncated": false,
+    "root_cause":               { "trace_id": 16, "error": "Too little received", "call_depth": 2, /* … */ },
+    "failing_function_decoded": { "selector": "0xa9059cbb", "name": "transfer", "signature": "transfer(address,uint256)", "source": "erc20" },
+    "diagnosis":                { "message": "…", "recommended_action": "…", "source": "builtin" }
+  }
+}
+```
+
+`null` is **always explicit**, never silently absent — D014 / D016. The
+backend won't drop a field; if it's not seeded / not applicable, you get
+`null` and decide how to handle it.
+
+### TypeScript
+
+```typescript
+import { AmarilloClient } from "./client.ts";
+
+const client = new AmarilloClient("http://localhost:3000");
+const detail = await client.getFailedTx("0xdead…0001");
+
+console.log("category:", detail.failed.error_category);
+console.log("function:",
+  detail.failing_function_decoded?.name ?? detail.failed.failing_function);
+if (detail.diagnosis) {
+  console.log("why:    ", detail.diagnosis.message);
+  console.log("action: ", detail.diagnosis.recommended_action ?? "(none)");
+}
+if (detail.root_cause) {
+  console.log("revert frame:", detail.root_cause.trace_id, detail.root_cause.error);
+}
+```
+
+### Python
+
+```python
+from client import AmarilloClient
+
+client = AmarilloClient("http://localhost:3000")
+detail = client.get_failed_tx("0xdead…0001")
+
+print("category:", detail.failed.error_category)
+fn = (
+    detail.failing_function_decoded.name
+    if detail.failing_function_decoded is not None
+    else detail.failed.failing_function
+)
+print("function:", fn)
+if detail.diagnosis is not None:
+    print("why:    ", detail.diagnosis.message)
+    print("action: ", detail.diagnosis.recommended_action or "(none)")
+if detail.root_cause is not None:
+    print("revert frame:", detail.root_cause.trace_id, repr(detail.root_cause.error))
+```
+
+---
+
+## 2. Alert subscription + webhook HMAC verification
+
+"Notify my webhook every time a `SLIPPAGE_EXCEEDED` failure happens." The
+`signing_secret` is revealed **exactly once** at creation (and rotation);
+the dispatcher signs each delivery with HMAC-SHA256 of the **raw body
+bytes**, keyed by the 32 bytes obtained from hex-decoding the secret.
+
+### curl: create the subscription
+
+```bash
+curl -sX POST http://localhost:3000/v1/alert-subscriptions \
+  -H 'content-type: application/json' \
+  -d '{"webhook_url":"https://example.com/hook","error_category":"SLIPPAGE_EXCEEDED"}' \
+  | jq
+```
+
+```jsonc
+{
+  "data": {
+    "subscription_id": 42,
+    "webhook_url":     "https://example.com/hook",
+    "error_category":  "SLIPPAGE_EXCEEDED",
+    "to_addr":         null,
+    "signing_secret":  "<64 hex chars — store immediately, never returned again>",
+    "active":          true,
+    "created_at":      "…"
+  }
+}
+```
+
+Each delivery the dispatcher POSTs carries:
+
+- `Content-Type: application/json`
+- `X-Amarillo-Signature: sha256=<hex>`
+
+### TypeScript receiver (Express)
+
+```typescript
+import express from "express";
+import { verifyAlertSignature } from "./client.ts";
+
+const SECRET = process.env.AMARILLO_SIGNING_SECRET!; // 64 hex chars
+const app = express();
+
+app.post(
+  "/amarillo-webhook",
+  express.raw({ type: "application/json" }), // raw body — NOT express.json()
+  (req, res) => {
+    const ok = verifyAlertSignature(
+      req.body,                             // Buffer
+      req.header("x-amarillo-signature"),
+      SECRET,
+    );
+    if (!ok) return res.status(401).json({ error: "bad signature" });
+    const payload = JSON.parse(req.body.toString("utf8"));
+    // handle payload…
+    res.json({ ok: true });
+  },
+);
+```
+
+### Python receiver (Flask)
+
+```python
+import os
+from flask import Flask, request, abort
+from client import verify_alert_signature
+
+SECRET = os.environ["AMARILLO_SIGNING_SECRET"]  # 64 hex chars
+app = Flask(__name__)
+
+
+@app.post("/amarillo-webhook")
+def webhook():
+    if not verify_alert_signature(
+        request.get_data(),                            # raw bytes — NOT request.json
+        request.headers.get("X-Amarillo-Signature"),
+        SECRET,
+    ):
+        abort(401, description="bad signature")
+    payload = request.get_json()                       # safe after verification
+    # handle payload…
+    return {"ok": True}
+```
+
+`request.get_data()` / `express.raw()` — read **raw bytes**, not parsed
+JSON. Reading-then-reserializing would break byte-equality and your
+signatures would never verify.
+
+### Rotating the secret
+
+```bash
+curl -sX POST http://localhost:3000/v1/alert-subscriptions/42/rotate-secret | jq
+```
+
+Same one-time-reveal contract as creation. The dispatcher will start
+signing with the new secret immediately — flip over your receiver before
+calling rotate.
+
+---
+
+## 3. Failures by labeled contract
+
+The S09 demo of an on-chain × off-chain join — failures grouped by labeled
+contract. Operators seed labels via the `contract_label` table (the migration
+ships a Uniswap V3 SwapRouter + Factory + per-pool starter set).
+
+### curl
+
+```bash
+curl -s "http://localhost:3000/v1/analytics/failed-tx/by-label?limit=10" | jq
+```
+
+```jsonc
+{
+  "data": [
+    {
+      "label":          "Uniswap V3 SwapRouter",
+      "address":        "0xe592427a0aece92de3edee1f18e0157c05861564",
+      "total_failures": 47,
+      "by_category":    { "SLIPPAGE_EXCEEDED": 31, "UNKNOWN": 16 }
+    }
+  ]
+}
+```
+
+Pivot invariant: `sum(by_category) === total_failures` (asserted in
+`scripts/verify-failed-tx-by-label.sh`). `address` is always lowercased.
+
+### TypeScript
+
+```typescript
+const rows = await client.getFailedTxByLabel({ limit: 10 });
+for (const r of rows) {
+  console.log(`${r.label} (${r.address.slice(0, 10)}…) total=${r.total_failures}`);
+  for (const [cat, n] of Object.entries(r.by_category)) {
+    console.log(`  ${cat}: ${n}`);
+  }
+}
+```
+
+### Python
+
+```python
+rows = client.get_failed_tx_by_label(limit=10)
+for r in rows:
+    print(f"{r.label} ({r.address[:10]}…) total={r.total_failures}")
+    for cat, n in r.by_category.items():
+        print(f"  {cat}: {n}")
+```
+
+---
+
+## Why no `npm install` / `pip install`?
+
+Per [`.gsd/DECISIONS.md`](../.gsd/DECISIONS.md) D017, the example clients
+are intentionally *stdlib-only*. Copy `client.ts` (or `client.py`) into
+your project and it works — no transitive dependencies, no version churn,
+no semver-of-our-own to manage. The "install" is a `cp`. PyPI and npm
+packaging is a separate slice (`S13.1` sketch in
+[`M001-ROADMAP.md`](../.gsd/M001-ROADMAP.md)).
+
+## M004 in one paragraph
+
+`/v1/failed-tx/{tx_hash}` answers **four** questions in a single round-trip:
+*did it fail* (`failed`), *where did the revert originate* (`root_cause`,
+S10), *what function was called* (`failing_function_decoded`, S11), and
+*why did it happen + what should I try next* (`diagnosis`, S12). That
+depth of per-transaction diagnosis isn't in Dune's query model: there's no
+`trace.error` in the public datasets, no consumer-specific ABI seeds, and
+no curated category-level recommendations. The moat the rest of M001~M004
+builds toward sits in this one response.
