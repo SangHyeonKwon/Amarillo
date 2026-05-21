@@ -73,10 +73,13 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
     `GET /v1/analytics/failed-tx/by-label` + `verify-failed-tx-by-label.sh` + web
     "Failures by labeled contract" 카드. **D013** (유스케이스 = 컨트랙트 라벨).
 
-## M004 — Diagnostic Depth  🚧 IN PROGRESS
-출하 정의: REQUIREMENTS.md#M004. "어디서/어떤 함수가/왜 실패했는지를 단건 응답에 정확하게."
-페르소나 = dApp 개발자(D014). 새 엔드포인트 추가 대신 기존
-`/v1/failed-tx/{tx_hash}` 응답이 누적적으로 더 똑똑해진다.
+## M004 — Diagnostic Depth (+ developer product surface)  ✅ SHIPPED → M004-SUMMARY.md
+출하 정의: REQUIREMENTS.md#M004. "어디서/어떤 함수가/왜+어떻게 실패했는지를
+단건 응답에 정확하게 + 개발자가 카피해 즉시 쓰는 표면까지(S13)."
+페르소나 = dApp 개발자(D014). 응답 4축(`failed`/`root_cause`/`failing_function_decoded`/
+`diagnosis`)이 한 호출에 + TS/Python 예시 + cookbook으로 *프로덕트 표면* 완성.
+수용 기준 전 항목 ✅, 최종 게이트 green (fmt/clippy/indexer 36/db --lib 14/
+db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
 
 - [x] **S10 — 콜트리 루트코즈 어트리뷰션** `[edge: untapped]` · risk: med · **DONE** → S10-SUMMARY.md
   - `/v1/failed-tx/{tx_hash}` 응답에 `root_cause: TraceLog | null` 가산 (D004 일관)
@@ -89,7 +92,7 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
   - `FailedTxDetail.failing_function_decoded: DecodedFunction | null` 가산
     (D004 일관, silent default 금지) + DB lookup + 핸들러 가산 + 통합테스트 4 +
     verify DECODED semantics + 프론트 KPI 갱신. **D015** (args 분리, 자기시드 정책).
-- [ ] **S11.1 — args 디코딩 + root_cause input 디코드** `[sketch]` `[edge: weak-spot]`
+- [ ] **S11.1 — args 디코딩 + root_cause input 디코드** `[sketch]` `[edge: weak-spot]` *(M005 후보 — 깊이 추가)*
 - [x] **S12 — 카테고리 진단 메시지 + 추천 액션** `[edge: weak-spot]` · risk: low-med · **DONE** → S12-SUMMARY.md
   - `category_diagnosis(error_category PK, message, recommended_action?, source?)`
     멱등 + 6 카테고리 시드(UNKNOWN/INSUFFICIENT_BALANCE/SLIPPAGE_EXCEEDED/
@@ -98,7 +101,7 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
     + `ErrorCategory::as_wire()` public 메서드 + DB lookup + 핸들러 가산 + 통합테스트 3
     + verify DIAG semantics(시드된 카테고리는 non-null 의미 단언) + 프론트 강조 블록.
     **D016** (스코프: 메시지+액션, enum 세분화는 S12.1).
-- [ ] **S12.1 — error_category enum 세분화 (v2)** `[sketch]` `[edge: weak-spot]`
+- [ ] **S12.1 — error_category enum 세분화 (v2)** `[sketch]` `[edge: weak-spot]` *(M005 후보 — 정밀도)*
 - [x] **S13 — 개발자 예시 클라이언트(TS+Python) + cookbook** `[edge: weak-spot]` · risk: low · **DONE** → S13-SUMMARY.md
   - `examples/typescript-client/` (fetch + node:crypto, 외부 의존 0, ambient.d.ts로
     npm 무도입) — `AmarilloClient` 전 엔드포인트 + `verifyAlertSignature` + 3 시나리오
@@ -107,7 +110,7 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
   - README.md 갱신 — Failure Intelligence API 표 확장 + "Client examples & cookbook" 신설
   - **D017** (예시 = SDK 동일, 게시는 S13.1)
   - **M004 acceptance 완성** — SHIPPED 선언 여부는 사용자 결정 대기
-- [ ] **S13.1 — SDK 패키지화(npm/PyPI 게시)** `[sketch]` (D017)
+- [ ] **S13.1 — SDK 패키지화(npm/PyPI 게시)** `[sketch]` (D017) *(M005 후보 — 운영성)*
 
 ---
 
@@ -131,5 +134,6 @@ green (fmt clean · clippy --workspace 0 · `-p indexer` 36 · `-p db --lib` 14 
 
 ## Reassess 규칙 (GSD-2)
 각 슬라이스 Complete 후 이 ROADMAP 갱신: 다음 슬라이스 `[sketch]` 해제·태스크 분해,
-새 Lesson은 KNOWLEDGE.md, 방향 변경은 DECISIONS.md. M003은 M002 출하 전 분해 금지
-(M001·M002 출하 완료 → 이제 M003 분해 가능).
+새 Lesson은 KNOWLEDGE.md, 방향 변경은 DECISIONS.md. M001·M002·M003·**M004 모두
+출하 완료** → 다음 마일스톤(M005) 분해는 사용자 지시 시(GSD-2: 출하 전 분해 금지
+원칙 일관). 후보는 M004-SUMMARY.md "잔여 (M005 후보)" 섹션 참조.
