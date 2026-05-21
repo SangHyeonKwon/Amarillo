@@ -469,6 +469,10 @@ describe("api/contract", () => {
           webhook_url: "https://example.com/hook",
           active: true,
           created_at: "2025-01-01T00:00:00Z",
+          sub_type: "per_event",
+          threshold_count: null,
+          threshold_window_secs: null,
+          debounce_secs: null,
         },
         {
           subscription_id: 2,
@@ -478,6 +482,10 @@ describe("api/contract", () => {
           webhook_url: "https://example.com/hook2",
           active: false,
           created_at: "2025-01-02T00:00:00Z",
+          sub_type: "per_event",
+          threshold_count: null,
+          threshold_window_secs: null,
+          debounce_secs: null,
         },
       ],
     });
@@ -504,11 +512,88 @@ describe("api/contract", () => {
           "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         active: true,
         created_at: "2025-01-01T00:00:00Z",
+        sub_type: "per_event",
+        threshold_count: null,
+        threshold_window_secs: null,
+        debounce_secs: null,
       },
     });
     expect(parsed.data.signing_secret).toHaveLength(64);
     expect(parsed.data.error_category).toBe("UNKNOWN");
     expect(parsed.data.subscription_id).toBe(42);
+    expect(parsed.data.sub_type).toBe("per_event");
+    expect(parsed.data.threshold_count).toBeNull();
+  });
+
+  // ── S14 / M005: rate_threshold alert subscription parsers ─────
+
+  it("parses rate_threshold subscription with rate fields on list", () => {
+    const parsed = parseAlertSubscriptionListEnvelope({
+      data: [
+        {
+          subscription_id: 99,
+          error_category: "SLIPPAGE_EXCEEDED",
+          to_addr: null,
+          webhook_url: "https://example.com/rate-hook",
+          active: true,
+          created_at: "2025-01-01T00:00:00Z",
+          sub_type: "rate_threshold",
+          threshold_count: 10,
+          threshold_window_secs: 300,
+          debounce_secs: 600,
+        },
+      ],
+    });
+    expect(parsed.data).toHaveLength(1);
+    expect(parsed.data[0].sub_type).toBe("rate_threshold");
+    expect(parsed.data[0].threshold_count).toBe(10);
+    expect(parsed.data[0].threshold_window_secs).toBe(300);
+    expect(parsed.data[0].debounce_secs).toBe(600);
+    expect("signing_secret" in parsed.data[0]).toBe(false);
+  });
+
+  it("parses rate_threshold subscription created (rate fields + signing_secret once)", () => {
+    const parsed = parseAlertSubscriptionCreatedEnvelope({
+      data: {
+        subscription_id: 7,
+        error_category: null,
+        to_addr: "0x00000000000000000000000000000000000000aa",
+        webhook_url: "https://example.com/rate-hook",
+        signing_secret:
+          "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+        active: true,
+        created_at: "2025-01-01T00:00:00Z",
+        sub_type: "rate_threshold",
+        threshold_count: 5,
+        threshold_window_secs: 60,
+        debounce_secs: 0,
+      },
+    });
+    expect(parsed.data.sub_type).toBe("rate_threshold");
+    expect(parsed.data.threshold_count).toBe(5);
+    expect(parsed.data.debounce_secs).toBe(0);
+    expect(parsed.data.signing_secret).toHaveLength(64);
+  });
+
+  it("alert subscription throws on invalid sub_type value", () => {
+    expect(() =>
+      parseAlertSubscriptionListEnvelope({
+        data: [
+          {
+            subscription_id: 1,
+            error_category: null,
+            to_addr: null,
+            webhook_url: "https://example.com/hook",
+            active: true,
+            created_at: "2025-01-01T00:00:00Z",
+            sub_type: "bogus",
+            threshold_count: null,
+            threshold_window_secs: null,
+            debounce_secs: null,
+          },
+        ],
+      }),
+    ).toThrow(/sub_type/);
   });
 
   it("alert subscription created throws when signing_secret missing", () => {

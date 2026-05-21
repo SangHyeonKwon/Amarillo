@@ -1,6 +1,7 @@
 import type {
   AlertSubscription,
   AlertSubscriptionCreated,
+  AlertSubType,
   ApiResponse,
   Block,
   DailySwapVolume,
@@ -69,6 +70,21 @@ function readInteger(value: unknown, path: string): number {
     throw new Error(`Invalid contract at ${path}: expected integer number.`);
   }
   return n;
+}
+
+function readOptionalInteger(value: unknown, path: string): number | null {
+  if (value === null) return null;
+  return readInteger(value, path);
+}
+
+function readAlertSubType(value: unknown, path: string): AlertSubType {
+  const s = readString(value, path);
+  if (s !== "per_event" && s !== "rate_threshold") {
+    throw new Error(
+      `Invalid contract at ${path}: expected 'per_event' or 'rate_threshold', got ${s}.`,
+    );
+  }
+  return s;
 }
 
 function readDecimal(value: unknown, path: string): Decimal {
@@ -546,6 +562,19 @@ function parseAlertSubscription(value: unknown, path: string): AlertSubscription
     webhook_url: readString(obj.webhook_url, `${path}.webhook_url`),
     active: readBoolean(obj.active, `${path}.active`),
     created_at: readIsoDateTime(obj.created_at, `${path}.created_at`),
+    sub_type: readAlertSubType(obj.sub_type, `${path}.sub_type`),
+    threshold_count: readOptionalInteger(
+      obj.threshold_count,
+      `${path}.threshold_count`,
+    ),
+    threshold_window_secs: readOptionalInteger(
+      obj.threshold_window_secs,
+      `${path}.threshold_window_secs`,
+    ),
+    debounce_secs: readOptionalInteger(
+      obj.debounce_secs,
+      `${path}.debounce_secs`,
+    ),
   };
 }
 
@@ -566,6 +595,19 @@ function parseAlertSubscriptionCreated(
     signing_secret: readString(obj.signing_secret, `${path}.signing_secret`),
     active: readBoolean(obj.active, `${path}.active`),
     created_at: readIsoDateTime(obj.created_at, `${path}.created_at`),
+    sub_type: readAlertSubType(obj.sub_type, `${path}.sub_type`),
+    threshold_count: readOptionalInteger(
+      obj.threshold_count,
+      `${path}.threshold_count`,
+    ),
+    threshold_window_secs: readOptionalInteger(
+      obj.threshold_window_secs,
+      `${path}.threshold_window_secs`,
+    ),
+    debounce_secs: readOptionalInteger(
+      obj.debounce_secs,
+      `${path}.debounce_secs`,
+    ),
   };
 }
 
