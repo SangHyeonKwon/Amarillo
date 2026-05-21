@@ -111,9 +111,13 @@ db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
 > M004 잔여 sketch(S11.1 / S12.1 / S13.1)와 단독 백로그(DNS-time SSRF / Pools·Traders
 > 매핑)는 [`BACKLOG.md`](BACKLOG.md) — 가치·리스크·페르소나·사전조건·크기 정리됨.
 
-## M005 — Bot Operator Persona  🚧 IN PROGRESS
-출하 정의: REQUIREMENTS.md#M005. "봇 운영자가 자기 봇의 실패 *패턴*을 *임계율* 알림으로 받는다 — 건별 노이즈 없이."
-페르소나 = **봇 운영자**(D018). M001~M004는 dApp 개발자 직격, M005는 새 페르소나 진입.
+## M005 — Bot Operator Persona  ✅ SHIPPED → M005-SUMMARY.md
+출하 정의: REQUIREMENTS.md#M005. "봇 운영자가 자기 봇의 실패 *패턴*을 *임계율*
+알림으로 받고, 자기 봇 라벨을 동적으로 등록·관리해 분리된 분석을 받는다."
+페르소나 = **봇 운영자**(D018). 응답 4축(rate sub + admin API + by-label?owner +
+cookbook)이 모두 박힘 — 새 페르소나 완결. 수용 기준 전 항목 ✅, 최종 게이트
+green (fmt/clippy/indexer 36/db --lib 14/db --ignored 27/verify 3종 ALL PASS/
+web 29/build 900/TS tsc/Python py_compile).
 
 - [x] **S14 — 임계율 집계 알림** `[edge: untapped]` · risk: med · **DONE** → S14-SUMMARY.md
   - `alert_subscription` + 4 컬럼(`sub_type` / `threshold_count` / `threshold_window_secs` /
@@ -125,8 +129,13 @@ db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
   - API POST body 확장(rate fields, 잘못된 조합 5종 400) + GET 표시 + verify 의미 단언
   - 프론트 /alerts: sub_type 라디오 + 조건부 rate 폼 + 목록 Mode 컬럼
   - **D018** (컬럼 가산 + sub_type 명시 + 디바운스 시간 기반 + race 시맨틱 정직)
-- [ ] **S15 — 봇 라벨 (자기 봇 식별)** `[sketch]` `[edge: weak-spot]`
-- [ ] **S16 — 봇 운영자 cookbook 시나리오** `[sketch]` `[edge: weak-spot]`
+- [x] **S15 — 봇 라벨 admin API + 봇 운영자 cookbook (M005 마감)** `[edge: weak-spot]` · risk: low · **DONE** → S15-SUMMARY.md
+  - `upsert_contract_label` (INSERT … ON CONFLICT DO UPDATE RETURNING) + `POST /v1/contract-labels`
+    UPSERT + `DELETE /v1/contract-labels/{address}` 멱등 (404 두 번째)
+  - 통합테스트 2 (upsert overwrite / delete idempotency) + verify 6 신규 (POST/upsert/400/DELETE/404/bad)
+  - `docs/api-failed-tx.md` admin endpoint 3 subsection + auth-or-the-lack-of-it (D008/D019)
+  - `docs/cookbook.md` 4번째 시나리오 "Bot operator playbook" (4 step curl+TS+Python receiver)
+  - **D019** (M005 마감, 봇 라벨 별 테이블 X, 인증 X 데모 스코프)
 
 ---
 
@@ -148,6 +157,7 @@ db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
 
 ## Reassess 규칙 (GSD-2)
 각 슬라이스 Complete 후 이 ROADMAP 갱신: 다음 슬라이스 `[sketch]` 해제·태스크 분해,
-새 Lesson은 KNOWLEDGE.md, 방향 변경은 DECISIONS.md. M001·M002·M003·**M004 모두
-출하 완료** → 다음 마일스톤(M005) 분해는 사용자 지시 시(GSD-2: 출하 전 분해 금지
-원칙 일관). 후보는 M004-SUMMARY.md "잔여 (M005 후보)" 섹션 참조.
+새 Lesson은 KNOWLEDGE.md, 방향 변경은 DECISIONS.md. M001·M002·M003·M004·**M005 모두
+출하 완료** → 다음 마일스톤(M006) 또는 단독 슬라이스 분해는 사용자 지시 시
+(GSD-2: 출하 전 분해 금지 원칙 일관). 후보는 [`BACKLOG.md`](BACKLOG.md) 우선순위
+표 + M005-SUMMARY.md "잔여" 섹션 참조.

@@ -4,7 +4,7 @@
 //! 픽스처는 시드(~18M)와 alerts(98M)/rollback(99M) 테스트와도 분리된 높은
 //! 블록(97M)을 쓰고, 끝에 라벨·블록·체크포인트를 원복한다.
 
-use db::models::{Block, Transaction};
+use db::models::{Block, ContractLabel, Transaction};
 
 const DEFAULT_URL: &str = "postgres://defi:defi@localhost:5432/defi_analytics";
 const BLOCK: i64 = 97_000_001; // 시드 + alerts(98M) + rollback(99M) 분리
@@ -136,4 +136,60 @@ async fn failed_tx_by_label_pivots_categories_and_filters_by_owner() {
             .await
             .expect("restore checkpoint");
     }
+}
+
+/// S15 (M005) — `upsert_contract_label` is the admin API's insert-or-update
+/// primitive. Two calls with the same address overwrite label/owner_id, and
+/// the second response carries the new values (not the old).
+#[tokio::test]
+#[ignore = "requires PostgreSQL: cargo test -p db -- --ignored"]
+async fn upsert_contract_label_creates_then_overwrites() {
+    let pool = db::create_pool(&db_url(), 2).await.expect("connect");
+    db::run_migrations(&pool).await.expect("migrate");
+    let addr = "0xfeedbeef00000000000000000000000000000015";
+
+    // (1) Initial create
+    let first: ContractLabel = db::queries::upsert_contract_label(&pool, addr, "First label", None)
+        .await
+        .expect("upsert ok");
+    assert_eq!(first.address, addr);
+    assert_eq!(first.label, "First label");
+    assert!(first.owner_id.is_none());
+
+    // (2) Same address, different label + owner — UPSERT must overwrite.
+    let second: ContractLabel =
+        db::queries::upsert_contract_label(&pool, addr, "Second label", Some("alice"))
+            .await
+            .expect("upsert again ok");
+    assert_eq!(second.address, addr);
+    assert_eq!(second.label, "Second label");
+    assert_eq!(second.owner_id.as_deref(), Some("alice"));
+
+    // teardown
+    let deleted = db::queries::delete_contract_label(&pool, addr)
+        .await
+        .expect("delete");
+    assert_eq!(deleted, 1);
+}
+
+/// S15 — DELETE idempotency: a second DELETE on the same address returns 0
+/// (no row affected). The admin API maps that to HTTP 404.
+#[tokio::test]
+#[ignore = "requires PostgreSQL: cargo test -p db -- --ignored"]
+async fn delete_contract_label_is_idempotent() {
+    let pool = db::create_pool(&db_url(), 2).await.expect("connect");
+    db::run_migrations(&pool).await.expect("migrate");
+    let addr = "0xdead00000000000000000000000000000000d015";
+
+    db::queries::upsert_contract_label(&pool, addr, "Test", None)
+        .await
+        .expect("upsert");
+    let first = db::queries::delete_contract_label(&pool, addr)
+        .await
+        .expect("delete");
+    assert_eq!(first, 1, "first delete removes the row");
+    let second = db::queries::delete_contract_label(&pool, addr)
+        .await
+        .expect("delete twice");
+    assert_eq!(second, 0, "second delete is a no-op (handler returns 404)");
 }

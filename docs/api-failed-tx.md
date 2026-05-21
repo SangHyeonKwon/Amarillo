@@ -301,9 +301,60 @@ The migration `migrations/20240105000001_add_contract_label.sql` seeds:
 - The Uniswap V3 SwapRouter + Factory addresses (global, `owner_id IS NULL`).
 - One label per existing `pool` row (`"<pair_name> (pool)"`).
 
-Operators add their own labels via the (admin-only) `insert_contract_label`
-DB function; an authenticated HTTP surface is intentionally **out of scope**
-for the demo (D013, D008 spirit).
+Operators add their own labels via the (admin-only) HTTP endpoints below
+(S15 / M005) or by hand-rolled SQL — both target the same `contract_label`
+table, so anything you create with `POST /v1/contract-labels` shows up in
+`GET /v1/analytics/failed-tx/by-label` the next call.
+
+### `POST /v1/contract-labels` — register a label (admin, S15 / M005)
+
+```jsonc
+// request
+{
+  "address":  "0xfeed000000000000000000000000000000000515",
+  "label":    "MyArbBot-3",
+  "owner_id": "alice"                  // optional; null = public label
+}
+
+// response 201
+{
+  "data": {
+    "address":    "0xfeed000000000000000000000000000000000515",
+    "label":      "MyArbBot-3",
+    "owner_id":   "alice",
+    "created_at": "…"
+  }
+}
+```
+
+`address` is normalized to lowercase. The endpoint is **UPSERT** — calling
+twice with the same address overwrites the row's `label` / `owner_id`, so
+operators can use the same call to rename or re-tag without a prior DELETE.
+
+Errors:
+
+- `address` isn't `0x` + 40 hex → **400**
+- `label` is empty or > 100 bytes → **400**
+- `owner_id` > 100 bytes (when present) → **400**
+
+### `DELETE /v1/contract-labels/{address}` — remove a label (admin, S15 / M005)
+
+- Bad address → **400**
+- Address not in the table → **404**
+- Successful removal → **204**
+
+Idempotency note: the *second* DELETE on the same address returns 404 (the
+row is already gone). Operators treating 404 as a no-op signal during retry
+is the intended interpretation.
+
+### Auth (or the lack of it)
+
+Both admin endpoints **ship unauthenticated** — they're a demo-scope
+surface (D008 / D019). Production deployments **must** put an auth
+middleware in front (e.g. an API key or signed JWT layer at the router
+boundary) before exposing `/v1/contract-labels/*` outside an operator-only
+network. The shape is stable; only the access control is intentionally
+deferred to a separate slice.
 
 ### Why this is the moat
 

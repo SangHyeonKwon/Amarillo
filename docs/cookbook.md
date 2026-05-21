@@ -247,6 +247,152 @@ for r in rows:
 
 ---
 
+## 4. Bot operator playbook (M005)
+
+End-to-end flow for the bot-operator persona: register your bot's address as
+a private label, subscribe to *rate-threshold* alerts (S14 — only fires when
+the failure count crosses a window threshold, then debounces), receive
+signed deliveries, and slice the failures by *your* labels (filtered to
+`owner_id=you`). Auth is intentionally absent at the demo layer
+([`.gsd/DECISIONS.md`](../.gsd/DECISIONS.md) D008 / D019) — production
+deployments put an auth middleware in front of `/v1/contract-labels`.
+
+### Step 1: register your bot as a label
+
+```bash
+curl -sX POST http://localhost:3000/v1/contract-labels \
+  -H 'content-type: application/json' \
+  -d '{"address":"0xfeed000000000000000000000000000000000bee","label":"MyArbBot-3","owner_id":"alice"}' \
+  | jq
+```
+
+The endpoint is **UPSERT** — re-POSTing the same address rewrites the
+label/owner. `address` lowercases server-side.
+
+TypeScript: extend `AmarilloClient` (or just call `fetch` directly with the
+shape above). Python: same pattern via `urllib.request.Request(method='POST', …)`.
+
+### Step 2: subscribe with `sub_type='rate_threshold'`
+
+```bash
+curl -sX POST http://localhost:3000/v1/alert-subscriptions \
+  -H 'content-type: application/json' \
+  -d '{
+        "webhook_url":           "https://my-receiver.example.com/bot-alerts",
+        "to_addr":               "0xfeed000000000000000000000000000000000bee",
+        "sub_type":              "rate_threshold",
+        "threshold_count":       10,
+        "threshold_window_secs": 300,
+        "debounce_secs":         600
+      }' \
+  | jq
+```
+
+Save the one-time `signing_secret` *now* — the server never returns it again.
+
+### Step 3: dispatcher fires when count ≥ 10 in 5 min
+
+The dispatcher (`indexer --dispatch-alerts`) polls, computes the rolling
+match count, and POSTs to `webhook_url` when the threshold is crossed.
+After a delivery it silences the same subscription for `debounce_secs`,
+so a single noisy outage produces *one* page, not a cascade.
+
+Receiver outline — verify the signature *before* trusting the body, branch
+on `sub_type`:
+
+```typescript
+// Node / Express (TypeScript)
+import { verifyAlertSignature } from "./client.ts";
+
+app.post(
+  "/bot-alerts",
+  express.raw({ type: "application/json" }),
+  (req, res) => {
+    const ok = verifyAlertSignature(
+      req.body,
+      req.header("x-amarillo-signature"),
+      process.env.AMARILLO_SIGNING_SECRET!,
+    );
+    if (!ok) return res.status(401).json({ error: "bad signature" });
+    const payload = JSON.parse(req.body.toString("utf8"));
+    if (payload.sub_type === "rate_threshold") {
+      // payload: { subscription_id, sub_type, match_count, threshold_count, threshold_window_secs }
+      pageOps(`Bot rate spike: ${payload.match_count} failures in ${payload.threshold_window_secs}s`);
+    } else {
+      // S08 per-event payload: { subscription_id, tx_hash }
+      logToTicket(payload);
+    }
+    res.json({ ok: true });
+  },
+);
+```
+
+```python
+# Flask (Python)
+from flask import Flask, request, abort
+from client import verify_alert_signature
+import os
+
+SECRET = os.environ["AMARILLO_SIGNING_SECRET"]
+app = Flask(__name__)
+
+
+@app.post("/bot-alerts")
+def webhook():
+    if not verify_alert_signature(
+        request.get_data(),
+        request.headers.get("X-Amarillo-Signature"),
+        SECRET,
+    ):
+        abort(401, description="bad signature")
+    payload = request.get_json()
+    if payload["sub_type"] == "rate_threshold":
+        page_ops(
+            f"Bot rate spike: {payload['match_count']} failures in "
+            f"{payload['threshold_window_secs']}s"
+        )
+    else:
+        log_to_ticket(payload)
+    return {"ok": True}
+```
+
+### Step 4: investigate with `by-label?owner=you`
+
+```bash
+curl -s "http://localhost:3000/v1/analytics/failed-tx/by-label?owner=alice&limit=20" | jq
+```
+
+Only labels you own come back — public labels (Uniswap router, etc.) stay
+out of view. Pivot invariant still holds: `sum(by_category) === total_failures`.
+
+```typescript
+const rows = await client.getFailedTxByLabel({ owner: "alice", limit: 20 });
+for (const r of rows) {
+  console.log(`${r.label} (${r.address.slice(0, 10)}…): ${r.total_failures} failures`);
+  for (const [cat, n] of Object.entries(r.by_category)) {
+    console.log(`  ${cat}: ${n}`);
+  }
+}
+```
+
+```python
+rows = client.get_failed_tx_by_label(owner="alice", limit=20)
+for r in rows:
+    print(f"{r.label} ({r.address[:10]}…): {r.total_failures} failures")
+    for cat, n in r.by_category.items():
+        print(f"  {cat}: {n}")
+```
+
+### Race semantics (S14 / D018)
+
+Two dispatcher workers can briefly fire the same rate alert before either
+writes its `alert_rate_dispatch` row — at worst one extra delivery. Permanent
+duplication is impossible (the *next* cycle's debounce check sees the
+latest `dispatched_at`). Receivers needing strict exactly-once should
+dedupe on `subscription_id + match_count`.
+
+---
+
 ## Why no `npm install` / `pip install`?
 
 Per [`.gsd/DECISIONS.md`](../.gsd/DECISIONS.md) D017, the example clients

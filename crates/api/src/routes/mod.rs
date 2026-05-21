@@ -1,6 +1,7 @@
 pub mod alerts;
 pub mod analytics;
 pub mod blocks;
+pub mod contract_labels;
 pub mod failed_tx;
 pub mod health;
 pub mod pools;
@@ -69,5 +70,14 @@ fn v1_router() -> Router<PgPool> {
         .route(
             "/alert-subscriptions/{id}/rotate-secret",
             post(alerts::rotate_alert_subscription_secret),
+        )
+        // contract labels (S15 / M005) — admin, NO auth (D008/D019 demo scope)
+        .route(
+            "/contract-labels",
+            post(contract_labels::create_contract_label),
+        )
+        .route(
+            "/contract-labels/{address}",
+            delete(contract_labels::delete_contract_label),
         )
 }
