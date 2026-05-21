@@ -347,11 +347,6 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::cmp_owned)]
-    // S16/M006 게이트 통과 시점 toolchain (rust-clippy 1.92)에서 `BigDecimal::from(0)`
-    // 비교가 cmp_owned로 잡힘 — 의도는 "양수 확인", BigDecimal의 const ZERO가
-    // 없어 named binding으로 빼도 lint 회피만 됨. 실측 영향 없음(test code), 별
-    // 단위 hardening 후보.
     fn test_decode_swap_event() {
         let (topics, data) = make_swap_log();
         let result = decode_log(&topics, &data, "0xpool", "0xtx", 0, Utc::now());
@@ -362,8 +357,15 @@ mod tests {
                 assert_eq!(s.pool_address, "0xpool");
                 assert_eq!(s.tx_hash, "0xtx");
                 assert_eq!(s.tick, 100);
-                assert!(s.amount_in > BigDecimal::from(0));
-                assert!(s.amount_out > BigDecimal::from(0));
+                // HARDEN4: assert "positive" without creating a throwaway
+                // BigDecimal on each comparison (was a clippy::cmp_owned trip
+                // in the inline S16 fix). Two named bindings — the comparison
+                // takes ownership, and BigDecimal isn't Copy, so we declare
+                // one per assertion rather than `.clone()`-ing implicitly.
+                let zero_in = BigDecimal::from(0);
+                let zero_out = BigDecimal::from(0);
+                assert!(s.amount_in > zero_in);
+                assert!(s.amount_out > zero_out);
             }
             _ => panic!("expected Swap variant"),
         }
