@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
-# Verify GET /v1/analytics/failed-tx/by-label (S09 / M003):
-#   - default call -> 200 with array<{label, address, total_failures, by_category}>
+# Verify GET /v1/analytics/failed-tx/by-label (S09 / M003) AND
+# POST/DELETE /v1/contract-labels admin endpoints (S15 / M005):
+#   - default call           -> 200 with array<{label, address, total_failures, by_category}>
 #   - bad `from` (non-RFC3339) -> 400 with { "error": ... }
-#   - owner=<unknown> -> 200 with empty array (no tenancy match)
+#   - owner=<unknown>        -> 200 with empty array (no tenancy match)
+#   - POST new label         -> 201 with the row (address lowercased)
+#   - POST same address      -> 201 with overwritten label (UPSERT semantics)
+#   - POST invalid address   -> 400
+#   - POST empty label       -> 400
+#   - DELETE existing        -> 204
+#   - DELETE same again      -> 404
 #
-# Tolerates empty data on the default call — depending on the seed,
+# Tolerates empty data on the default by-label call — depending on the seed,
 # label-joinable failed_transactions may or may not exist; the contract
 # (shape + status codes) is what we pin.
 set -uo pipefail
@@ -23,7 +30,13 @@ fi
 
 ./target/debug/api >/tmp/verify-by-label-api.log 2>&1 &
 API_PID=$!
-cleanup() { kill "$API_PID" 2>/dev/null || true; }
+ADMIN_ADDR=""
+cleanup() {
+  if [ -n "$ADMIN_ADDR" ]; then
+    curl -fsS -X DELETE "http://127.0.0.1:$PORT/v1/contract-labels/$ADMIN_ADDR" >/dev/null 2>&1 || true
+  fi
+  kill "$API_PID" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 for _ in $(seq 1 60); do
@@ -93,6 +106,94 @@ if [ "$oc" = 200 ]; then
   ' || fail=1
 else
   echo "  FAIL — expected 200"; cat /tmp/vlbl-owner.json; fail=1
+fi
+
+# --- S15 / M005: contract-labels admin endpoints ---
+ADMIN_URL="http://127.0.0.1:$PORT/v1/contract-labels"
+ADMIN_ADDR="0xfeed000000000000000000000000000000000515"
+
+# POST create -> 201, address lowercased + label/owner round-trip
+ac=$(curl -s -o /tmp/vlbl-admin-create.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$ADMIN_URL" \
+  --data "{\"address\":\"$ADMIN_ADDR\",\"label\":\"Admin Test Bot\",\"owner_id\":\"verify-script\"}")
+echo "POST create: HTTP $ac"
+if [ "$ac" = 201 ]; then
+  node -e "
+    const d = (require('/tmp/vlbl-admin-create.json').data) || {};
+    if (d.address !== '$ADMIN_ADDR') { console.log('  FAIL: address mismatch (lowercased?):', d.address); process.exit(1); }
+    if (d.label !== 'Admin Test Bot') { console.log('  FAIL: label mismatch:', d.label); process.exit(1); }
+    if (d.owner_id !== 'verify-script') { console.log('  FAIL: owner_id mismatch:', d.owner_id); process.exit(1); }
+    console.log('  PASS (address=' + d.address.slice(0, 10) + '… label=\"' + d.label + '\")');
+  " || fail=1
+else
+  echo "  FAIL — expected 201"; cat /tmp/vlbl-admin-create.json; fail=1
+fi
+
+# POST upsert (same address, new label) -> 201 with overwritten label
+uc=$(curl -s -o /tmp/vlbl-admin-upsert.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$ADMIN_URL" \
+  --data "{\"address\":\"$ADMIN_ADDR\",\"label\":\"Renamed Bot\",\"owner_id\":\"verify-script\"}")
+echo "POST upsert: HTTP $uc"
+if [ "$uc" = 201 ]; then
+  node -e "
+    const d = (require('/tmp/vlbl-admin-upsert.json').data) || {};
+    if (d.label !== 'Renamed Bot') {
+      console.log('  FAIL: UPSERT did not overwrite label, got:', d.label); process.exit(1);
+    }
+    console.log('  PASS (label overwritten to \"' + d.label + '\")');
+  " || fail=1
+else
+  echo "  FAIL — expected 201"; cat /tmp/vlbl-admin-upsert.json; fail=1
+fi
+
+# POST invalid address -> 400
+ic=$(curl -s -o /tmp/vlbl-admin-bad.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$ADMIN_URL" \
+  --data '{"address":"0xnothex","label":"Bad"}')
+echo "POST bad address: HTTP $ic"
+if [ "$ic" = 400 ] && grep -q '"error"' /tmp/vlbl-admin-bad.json; then
+  echo "  PASS"
+else
+  echo "  FAIL"; cat /tmp/vlbl-admin-bad.json; fail=1
+fi
+
+# POST empty label -> 400
+ec=$(curl -s -o /tmp/vlbl-admin-emptylabel.json -w '%{http_code}' -H 'Content-Type: application/json' \
+  -X POST "$ADMIN_URL" \
+  --data "{\"address\":\"0xaaaa000000000000000000000000000000000aaa\",\"label\":\"\"}")
+echo "POST empty label: HTTP $ec"
+if [ "$ec" = 400 ] && grep -q '"error"' /tmp/vlbl-admin-emptylabel.json; then
+  echo "  PASS"
+else
+  echo "  FAIL"; cat /tmp/vlbl-admin-emptylabel.json; fail=1
+fi
+
+# DELETE existing -> 204
+dc=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$ADMIN_URL/$ADMIN_ADDR")
+echo "DELETE existing: HTTP $dc"
+if [ "$dc" = 204 ]; then
+  echo "  PASS"
+  ADMIN_ADDR=""  # already cleaned up
+else
+  echo "  FAIL — expected 204"; fail=1
+fi
+
+# DELETE again -> 404
+dc2=$(curl -s -o /tmp/vlbl-admin-del2.json -w '%{http_code}' -X DELETE "$ADMIN_URL/0xfeed000000000000000000000000000000000515")
+echo "DELETE same again: HTTP $dc2"
+if [ "$dc2" = 404 ] && grep -q '"error"' /tmp/vlbl-admin-del2.json; then
+  echo "  PASS"
+else
+  echo "  FAIL"; cat /tmp/vlbl-admin-del2.json; fail=1
+fi
+
+# DELETE invalid address -> 400
+dbc=$(curl -s -o /tmp/vlbl-admin-delbad.json -w '%{http_code}' -X DELETE "$ADMIN_URL/0xnothex")
+echo "DELETE bad address: HTTP $dbc"
+if [ "$dbc" = 400 ] && grep -q '"error"' /tmp/vlbl-admin-delbad.json; then
+  echo "  PASS"
+else
+  echo "  FAIL"; cat /tmp/vlbl-admin-delbad.json; fail=1
 fi
 
 if [ "$fail" -eq 0 ]; then
