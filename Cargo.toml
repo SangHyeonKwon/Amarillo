@@ -69,3 +69,6 @@ url = "2"
 
 # CSPRNG for webhook signing-secret generation (S08, API layer)
 getrandom = "0.2"
+
+# Constant-time equality for admin API key comparison (S16/M006, API layer)
+subtle = { version = "2.5", default-features = false }

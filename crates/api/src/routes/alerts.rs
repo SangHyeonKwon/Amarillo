@@ -7,6 +7,11 @@
 //!   덕에 이후 조회·로그에선 노출되지 않음.
 //! - GET: 활성·비활성 모두 최신순(`subscription_id DESC`), `limit` 캡(1..=500).
 //! - DELETE: soft 비활성화 (`active = FALSE`). 행 미존재/이미 비활성이면 404.
+//!
+//! **인증 (S16/M006/D021 적용)**: POST / DELETE / POST `.../rotate-secret` 세 핸들러는
+//! `_: AdminAuth`로 보호된다. GET (`list_alert_subscriptions`)은 *비보호 유지* —
+//! `signing_secret`은 모델 `#[serde(skip_serializing)]`로 어차피 노출되지 않으므로
+//! 메타 조회의 임베드성을 보존(GET 보호가 필요해지는 첫 요구가 오면 별 슬라이스).
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -14,6 +19,7 @@ use axum::Json;
 use serde::Deserialize;
 use sqlx::PgPool;
 
+use crate::auth::AdminAuth;
 use crate::error::ApiError;
 use crate::response::ApiResponse;
 use db::models::{AlertSubscription, AlertSubscriptionCreated, ErrorCategory};
@@ -81,8 +87,9 @@ fn is_evm_address(lower: &str) -> bool {
 ///
 /// 거부 케이스(전부 400): `webhook_url`이 [`webhook_url_is_safe`]에서 reject /
 /// `webhook_url` 길이가 [`MAX_WEBHOOK_URL_LEN`] 초과 / `error_category` 파싱 실패
-/// / `to_addr` 형식 오류.
+/// / `to_addr` 형식 오류. 인증 필수 (S16/M006/D021).
 pub async fn create_alert_subscription(
+    _: AdminAuth,
     State(pool): State<PgPool>,
     Json(body): Json<CreateBody>,
 ) -> Result<(StatusCode, Json<ApiResponse<AlertSubscriptionCreated>>), ApiError> {
@@ -209,7 +216,9 @@ pub async fn list_alert_subscriptions(
 ///
 /// 영구 삭제는 호출자가 별도 절차로(예: 어드민 도구) 처리 — 본 엔드포인트는
 /// **운영 안전을 위해 soft만** 제공(`alert_delivery` 멱등 이력을 보존).
+/// 인증 필수 (S16/M006/D021).
 pub async fn deactivate_alert_subscription(
+    _: AdminAuth,
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, ApiError> {
@@ -228,7 +237,9 @@ pub async fn deactivate_alert_subscription(
 ///
 /// 사용 흐름: 시크릿 분실/노출 의심 → 본 엔드포인트 호출 → 응답의 새 시크릿을
 /// 수신측에 즉시 갱신 → 이 시각 이후의 webhook은 새 시크릿으로 서명되어 도착.
+/// 인증 필수 (S16/M006/D021).
 pub async fn rotate_alert_subscription_secret(
+    _: AdminAuth,
     State(pool): State<PgPool>,
     Path(id): Path<i64>,
 ) -> Result<Json<ApiResponse<AlertSubscriptionCreated>>, ApiError> {

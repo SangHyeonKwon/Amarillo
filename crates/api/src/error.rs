@@ -15,6 +15,11 @@ pub enum ApiError {
     #[error("bad request: {0}")]
     BadRequest(String),
 
+    /// 인증 실패 (401) — S16/M006/D021. 헤더 누락 / 형식 오류 / 키 불일치 모두
+    /// 동일 응답 (info-leak 방지: 키 존재 여부·길이 노출 X).
+    #[error("unauthorized")]
+    Unauthorized,
+
     /// 내부 서버 에러 (500)
     #[error("internal error: {0}")]
     Internal(String),
@@ -42,6 +47,7 @@ impl IntoResponse for ApiError {
         let (status, message) = match &self {
             ApiError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };
         let body = Json(serde_json::json!({ "error": message }));

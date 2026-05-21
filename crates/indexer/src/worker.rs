@@ -993,9 +993,9 @@ mod tests {
         // 본 깊이 전부 불일치 + 더 깊은 로컬 존재 → 확대 요청 (R1)
         let local = [(100u64, h("o100")), (99, h("o99")), (98, h("o98"))];
         let chain = |n: u64| Some(format!("new{n}"));
-        assert_eq!(classify_fork(&local, &chain, 2), ForkScan::NeedDeeper);
+        assert_eq!(classify_fork(&local, chain, 2), ForkScan::NeedDeeper);
         // 전부 봤는데(더 깊은 로컬 없음) 다 불일치 → best-effort 최저 floor
-        assert_eq!(classify_fork(&local, &chain, 3), ForkScan::Fork(98));
+        assert_eq!(classify_fork(&local, chain, 3), ForkScan::Fork(98));
     }
 
     #[test]

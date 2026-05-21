@@ -29,3 +29,10 @@ bigdecimal.workspace = true
 # Alerts API (S08-T03)
 hex.workspace = true
 getrandom.workspace = true
+
+# Admin auth (S16/M006) — constant-time key comparison
+subtle.workspace = true
+
+[dev-dependencies]
+# tower::ServiceExt::oneshot for axum router integration tests (S16/M006)
+tower = { version = "0.5", features = ["util"] }
