@@ -225,6 +225,9 @@ export interface FailedTxByLabelPoint {
 
 // ── Alert subscriptions (S08 + HARDEN2) ─────────────────────────────
 
+/** `per_event` (S08, 1-매칭=1-웹훅) | `rate_threshold` (S14/M005, 윈도우 임계). */
+export type AlertSubType = "per_event" | "rate_threshold";
+
 /**
  * `/v1/alert-subscriptions` list/get row. The backend serde-skips
  * `signing_secret` here (`#[serde(skip_serializing)]` on the model), so this
@@ -240,6 +243,14 @@ export interface AlertSubscription {
   webhook_url: string;
   active: boolean;
   created_at: IsoDateTime;
+  /** S14/M005 — sub mode. Default `per_event`. */
+  sub_type: AlertSubType;
+  /** rate_threshold required (per_event always `null`). Match count in window. */
+  threshold_count: number | null;
+  /** rate_threshold required: window length in seconds. */
+  threshold_window_secs: number | null;
+  /** rate_threshold required: silence period after a delivery, seconds. */
+  debounce_secs: number | null;
 }
 
 /**
@@ -261,6 +272,10 @@ export interface AlertSubscriptionCreated {
   signing_secret: string;
   active: boolean;
   created_at: IsoDateTime;
+  sub_type: AlertSubType;
+  threshold_count: number | null;
+  threshold_window_secs: number | null;
+  debounce_secs: number | null;
 }
 
 /** `POST /v1/alert-subscriptions` request body. */
@@ -268,6 +283,11 @@ export interface CreateAlertSubscriptionBody {
   webhook_url: string;
   error_category?: ErrorCategory;
   to_addr?: string;
+  /** Optional — default `per_event` if omitted (S14/M005). */
+  sub_type?: AlertSubType;
+  threshold_count?: number;
+  threshold_window_secs?: number;
+  debounce_secs?: number;
 }
 
 export interface PoolStats {

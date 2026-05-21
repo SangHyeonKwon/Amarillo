@@ -108,8 +108,25 @@ db --ignored 22/verify 3종 ALL PASS/web 26/build 900/TS tsc/Python py_compile).
   - README.md 갱신 — Failure Intelligence API 표 확장 + "Client examples & cookbook" 신설
   - **D017** (예시 = SDK 동일, 게시는 S13.1)
 
-> M005 후보 sketch(S11.1 / S12.1 / S13.1)와 단독 백로그(DNS-time SSRF / 임계율 집계
-> / Pools·Traders 매핑)는 [`BACKLOG.md`](BACKLOG.md) — 가치·리스크·페르소나·사전조건·크기 정리됨.
+> M004 잔여 sketch(S11.1 / S12.1 / S13.1)와 단독 백로그(DNS-time SSRF / Pools·Traders
+> 매핑)는 [`BACKLOG.md`](BACKLOG.md) — 가치·리스크·페르소나·사전조건·크기 정리됨.
+
+## M005 — Bot Operator Persona  🚧 IN PROGRESS
+출하 정의: REQUIREMENTS.md#M005. "봇 운영자가 자기 봇의 실패 *패턴*을 *임계율* 알림으로 받는다 — 건별 노이즈 없이."
+페르소나 = **봇 운영자**(D018). M001~M004는 dApp 개발자 직격, M005는 새 페르소나 진입.
+
+- [x] **S14 — 임계율 집계 알림** `[edge: untapped]` · risk: med · **DONE** → S14-SUMMARY.md
+  - `alert_subscription` + 4 컬럼(`sub_type` / `threshold_count` / `threshold_window_secs` /
+    `debounce_secs`) 가산 + CHECK 제약 + `alert_rate_dispatch` 테이블
+  - `find_pending_rate_alert_matches`(시간 윈도우 + 디바운스 검증) + `record_rate_alert_dispatch`
+    + `dispatch_rate_once` (별 페이로드, claim 불필요 — SQL 디바운스 race-safe)
+  - `find_pending_alert_matches`에 `sub_type='per_event'` 필터 추가(rate가 per-event
+    matcher에 잡히는 회귀 차단)
+  - API POST body 확장(rate fields, 잘못된 조합 5종 400) + GET 표시 + verify 의미 단언
+  - 프론트 /alerts: sub_type 라디오 + 조건부 rate 폼 + 목록 Mode 컬럼
+  - **D018** (컬럼 가산 + sub_type 명시 + 디바운스 시간 기반 + race 시맨틱 정직)
+- [ ] **S15 — 봇 라벨 (자기 봇 식별)** `[sketch]` `[edge: weak-spot]`
+- [ ] **S16 — 봇 운영자 cookbook 시나리오** `[sketch]` `[edge: weak-spot]`
 
 ---
 

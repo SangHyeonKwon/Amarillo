@@ -31,6 +31,9 @@ const SECRET_BYTES: usize = 32;
 const ADDR_HEX_LEN: usize = 40;
 
 /// `POST /v1/alert-subscriptions` 요청 본문.
+///
+/// S14/M005 — rate_threshold 모드는 `sub_type='rate_threshold'` + 3 rate 필드 모두
+/// 필수. per_event 모드(기본)는 rate 필드가 있으면 400 (잘못된 조합).
 #[derive(Debug, Deserialize)]
 pub struct CreateBody {
     /// 알림을 받을 HTTPS URL (사설/loopback/메타데이터/로컬 호스트 거부)
@@ -39,6 +42,14 @@ pub struct CreateBody {
     pub error_category: Option<String>,
     /// 매칭할 컨트랙트 주소 (`0x` + 40 hex; 생략 시 모든 주소). 자동 소문자.
     pub to_addr: Option<String>,
+    /// `per_event` (기본) | `rate_threshold` (S14/M005)
+    pub sub_type: Option<String>,
+    /// rate_threshold 필수: 윈도우 내 임계 카운트 (> 0)
+    pub threshold_count: Option<i32>,
+    /// rate_threshold 필수: 카운트 윈도우 (초, > 0)
+    pub threshold_window_secs: Option<i32>,
+    /// rate_threshold 필수: 발송 후 디바운스 (초, >= 0)
+    pub debounce_secs: Option<i32>,
 }
 
 /// `GET /v1/alert-subscriptions` 쿼리 파라미터.
@@ -107,26 +118,76 @@ pub async fn create_alert_subscription(
         }
     };
 
+    // S14/M005 — sub_type 분기 + rate 필드 일관성 검증 (잘못된 조합은 모두 400)
+    let sub_type = match body.sub_type.as_deref() {
+        None | Some("") | Some("per_event") => "per_event",
+        Some("rate_threshold") => "rate_threshold",
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "invalid `sub_type` (expected 'per_event' or 'rate_threshold'): {other}"
+            )));
+        }
+    };
     let signing_secret = generate_signing_secret()?;
-    let row = db::queries::insert_alert_subscription(
-        &pool,
-        category.as_ref(),
-        to_addr_norm.as_deref(),
-        &body.webhook_url,
-        &signing_secret,
-    )
-    .await?;
+    let row = if sub_type == "per_event" {
+        if body.threshold_count.is_some()
+            || body.threshold_window_secs.is_some()
+            || body.debounce_secs.is_some()
+        {
+            return Err(ApiError::BadRequest(
+                "per_event sub_type must not carry threshold_count / threshold_window_secs / debounce_secs"
+                    .into(),
+            ));
+        }
+        db::queries::insert_alert_subscription(
+            &pool,
+            category.as_ref(),
+            to_addr_norm.as_deref(),
+            &body.webhook_url,
+            &signing_secret,
+        )
+        .await?
+    } else {
+        // rate_threshold: 3 필드 필수 + 양수/비음수 검증
+        let threshold_count = body.threshold_count.ok_or_else(|| {
+            ApiError::BadRequest("rate_threshold requires `threshold_count` (> 0)".into())
+        })?;
+        let threshold_window_secs = body.threshold_window_secs.ok_or_else(|| {
+            ApiError::BadRequest("rate_threshold requires `threshold_window_secs` (> 0)".into())
+        })?;
+        let debounce_secs = body.debounce_secs.ok_or_else(|| {
+            ApiError::BadRequest("rate_threshold requires `debounce_secs` (>= 0)".into())
+        })?;
+        if threshold_count <= 0 {
+            return Err(ApiError::BadRequest(format!(
+                "`threshold_count` must be > 0; got {threshold_count}"
+            )));
+        }
+        if threshold_window_secs <= 0 {
+            return Err(ApiError::BadRequest(format!(
+                "`threshold_window_secs` must be > 0; got {threshold_window_secs}"
+            )));
+        }
+        if debounce_secs < 0 {
+            return Err(ApiError::BadRequest(format!(
+                "`debounce_secs` must be >= 0; got {debounce_secs}"
+            )));
+        }
+        db::queries::insert_alert_subscription_rate(
+            &pool,
+            category.as_ref(),
+            to_addr_norm.as_deref(),
+            &body.webhook_url,
+            &signing_secret,
+            threshold_count,
+            threshold_window_secs,
+            debounce_secs,
+        )
+        .await?
+    };
 
     // 보안: signing_secret을 응답에 1회 노출(이후엔 어디서도 조회 불가).
-    let created = AlertSubscriptionCreated {
-        subscription_id: row.subscription_id,
-        error_category: row.error_category,
-        to_addr: row.to_addr,
-        webhook_url: row.webhook_url,
-        signing_secret: row.signing_secret,
-        active: row.active,
-        created_at: row.created_at,
-    };
+    let created: AlertSubscriptionCreated = row.into();
     Ok((StatusCode::CREATED, Json(ApiResponse { data: created })))
 }
 
@@ -180,14 +241,6 @@ pub async fn rotate_alert_subscription_secret(
             ))
         })?;
 
-    let created = AlertSubscriptionCreated {
-        subscription_id: row.subscription_id,
-        error_category: row.error_category,
-        to_addr: row.to_addr,
-        webhook_url: row.webhook_url,
-        signing_secret: row.signing_secret,
-        active: row.active,
-        created_at: row.created_at,
-    };
+    let created: AlertSubscriptionCreated = row.into();
     Ok(Json(ApiResponse { data: created }))
 }

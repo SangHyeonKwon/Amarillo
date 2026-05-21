@@ -10,6 +10,7 @@ import {
 import {
   type AlertSubscription,
   type AlertSubscriptionCreated,
+  type AlertSubType,
   type CreateAlertSubscriptionBody,
   ERROR_CATEGORIES,
   type ErrorCategory,
@@ -44,6 +45,11 @@ export function Alerts() {
   const [webhookUrl, setWebhookUrl] = useState("");
   const [category, setCategory] = useState<ErrorCategory | "ALL">("ALL");
   const [toAddr, setToAddr] = useState("");
+  // S14 / M005 — rate-threshold extension. Empty strings while in per_event mode.
+  const [subType, setSubType] = useState<AlertSubType>("per_event");
+  const [thresholdCount, setThresholdCount] = useState("");
+  const [thresholdWindowSecs, setThresholdWindowSecs] = useState("");
+  const [debounceSecs, setDebounceSecs] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
 
   // ── one-time secret reveal (lives only here, never persisted) ──
@@ -86,6 +92,24 @@ export function Alerts() {
       ...(category !== "ALL" ? { error_category: category } : {}),
       ...(lower ? { to_addr: lower } : {}),
     };
+    if (subType === "rate_threshold") {
+      const tc = Number.parseInt(thresholdCount, 10);
+      const tw = Number.parseInt(thresholdWindowSecs, 10);
+      const db = Number.parseInt(debounceSecs, 10);
+      if (!Number.isInteger(tc) || tc <= 0) {
+        return { ok: false, error: "threshold_count must be a positive integer." };
+      }
+      if (!Number.isInteger(tw) || tw <= 0) {
+        return { ok: false, error: "threshold_window_secs must be a positive integer." };
+      }
+      if (!Number.isInteger(db) || db < 0) {
+        return { ok: false, error: "debounce_secs must be a non-negative integer." };
+      }
+      body.sub_type = "rate_threshold";
+      body.threshold_count = tc;
+      body.threshold_window_secs = tw;
+      body.debounce_secs = db;
+    }
     return { ok: true, body };
   }
 
@@ -103,6 +127,10 @@ export function Alerts() {
       setWebhookUrl("");
       setCategory("ALL");
       setToAddr("");
+      setSubType("per_event");
+      setThresholdCount("");
+      setThresholdWindowSecs("");
+      setDebounceSecs("");
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : String(err));
     }
@@ -200,6 +228,29 @@ export function Alerts() {
           </span>
         ) : (
           <span className="muted">Any</span>
+        ),
+    },
+    {
+      header: "Mode",
+      cell: (s) =>
+        s.sub_type === "rate_threshold" ? (
+          <span style={{ display: "inline-block", textAlign: "left" }}>
+            <span
+              className="badge"
+              style={{
+                color: "#3ECF8E",
+                borderColor: "#3ECF8E",
+                fontSize: 11,
+              }}
+            >
+              Rate ≥ {s.threshold_count} / {s.threshold_window_secs}s
+            </span>
+            <div className="muted" style={{ fontSize: 11, marginTop: 2 }}>
+              debounce {s.debounce_secs}s
+            </div>
+          </span>
+        ) : (
+          <span className="muted">Per event</span>
         ),
     },
     {
@@ -309,6 +360,76 @@ export function Alerts() {
               maxLength={42}
             />
           </div>
+          <div className="field">
+            <label>Subscription mode (S14)</label>
+            <div className="toolbar" style={{ gap: 16, flexWrap: "wrap" }}>
+              <label style={{ display: "inline-flex", gap: 6 }}>
+                <input
+                  type="radio"
+                  name="sub_type"
+                  value="per_event"
+                  checked={subType === "per_event"}
+                  onChange={() => setSubType("per_event")}
+                />
+                Per event (1 match = 1 webhook)
+              </label>
+              <label style={{ display: "inline-flex", gap: 6 }}>
+                <input
+                  type="radio"
+                  name="sub_type"
+                  value="rate_threshold"
+                  checked={subType === "rate_threshold"}
+                  onChange={() => setSubType("rate_threshold")}
+                />
+                Rate threshold (count ≥ N in window, then debounce)
+              </label>
+            </div>
+          </div>
+          {subType === "rate_threshold" && (
+            <div
+              className="grid"
+              style={{
+                gap: 8,
+                gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+                borderLeft: "3px solid #3ECF8E",
+                paddingLeft: 12,
+              }}
+            >
+              <div className="field">
+                <label htmlFor="threshold-count">threshold_count *</label>
+                <input
+                  id="threshold-count"
+                  type="number"
+                  min={1}
+                  placeholder="e.g. 10"
+                  value={thresholdCount}
+                  onChange={(e) => setThresholdCount(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="threshold-window">window_secs *</label>
+                <input
+                  id="threshold-window"
+                  type="number"
+                  min={1}
+                  placeholder="e.g. 300"
+                  value={thresholdWindowSecs}
+                  onChange={(e) => setThresholdWindowSecs(e.target.value)}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="debounce">debounce_secs *</label>
+                <input
+                  id="debounce"
+                  type="number"
+                  min={0}
+                  placeholder="e.g. 600"
+                  value={debounceSecs}
+                  onChange={(e) => setDebounceSecs(e.target.value)}
+                />
+              </div>
+            </div>
+          )}
           {formError && (
             <div
               role="alert"

@@ -479,6 +479,11 @@ pub struct FailedTxTrendPoint {
 ///
 /// `signing_secret`은 생성 응답([`AlertSubscriptionCreated`])에서 **1회만** 노출
 /// 하고, 목록 직렬화에선 `#[serde(skip_serializing)]`로 제외한다(시크릿).
+///
+/// `sub_type='per_event'` (default, S08) — 매칭 실패 tx 1건당 1회 webhook.
+/// `sub_type='rate_threshold'` (S14/M005) — 윈도우 내 매칭 카운트가 임계 이상이면
+/// 1회 webhook, 발송 후 `debounce_secs` 동안 같은 sub 무시. CHECK 제약으로 rate
+/// 모드면 3 컬럼 모두 NOT NULL.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct AlertSubscription {
     /// 구독 ID (PK)
@@ -496,6 +501,37 @@ pub struct AlertSubscription {
     pub active: bool,
     /// 생성 시각
     pub created_at: DateTime<Utc>,
+    /// `per_event` | `rate_threshold` (S14/M005, default per_event)
+    pub sub_type: String,
+    /// rate_threshold: 임계 카운트 (per_event는 NULL)
+    pub threshold_count: Option<i32>,
+    /// rate_threshold: 카운트 윈도우 (초)
+    pub threshold_window_secs: Option<i32>,
+    /// rate_threshold: 발송 후 디바운스 시간 (초)
+    pub debounce_secs: Option<i32>,
+}
+
+/// `AlertSubscription` → `AlertSubscriptionCreated` 변환 (S14 / M005).
+///
+/// 한 곳에서 매핑 — sub_type 등 rate 필드가 늘어나도 호출처(api 핸들러)는
+/// `row.into()` 한 줄. 단방향(생성/회전 응답에서 `signing_secret`을 *그대로*
+/// 노출), 일반 list 응답에는 사용 금지(시크릿 노출 위험).
+impl From<AlertSubscription> for AlertSubscriptionCreated {
+    fn from(s: AlertSubscription) -> Self {
+        Self {
+            subscription_id: s.subscription_id,
+            error_category: s.error_category,
+            to_addr: s.to_addr,
+            webhook_url: s.webhook_url,
+            signing_secret: s.signing_secret,
+            active: s.active,
+            created_at: s.created_at,
+            sub_type: s.sub_type,
+            threshold_count: s.threshold_count,
+            threshold_window_secs: s.threshold_window_secs,
+            debounce_secs: s.debounce_secs,
+        }
+    }
 }
 
 /// 구독 생성(POST) 응답 — `signing_secret`을 **이때 한 번만** 반환한다.
@@ -515,6 +551,14 @@ pub struct AlertSubscriptionCreated {
     pub active: bool,
     /// 생성 시각
     pub created_at: DateTime<Utc>,
+    /// `per_event` | `rate_threshold` (S14/M005)
+    pub sub_type: String,
+    /// rate_threshold: 임계 카운트 (per_event는 None)
+    pub threshold_count: Option<i32>,
+    /// rate_threshold: 카운트 윈도우 (초)
+    pub threshold_window_secs: Option<i32>,
+    /// rate_threshold: 디바운스 시간 (초)
+    pub debounce_secs: Option<i32>,
 }
 
 /// 디스패처가 전송할 (구독 × 미전송 실패 tx) 매칭 1건. 내부용(직렬화 안 함).
@@ -528,6 +572,21 @@ pub struct AlertMatch {
     pub webhook_url: String,
     /// 본문 서명용 HMAC 키
     pub signing_secret: String,
+}
+
+/// rate_threshold 디스패처가 발송할 (구독 × 윈도우 카운트) 매칭 1건 (S14/M005).
+///
+/// `match_count`는 윈도우 내 매칭된 실패 tx 수, `threshold_count`/
+/// `threshold_window_secs`는 발송 payload에 포함하기 위한 sub 메타. 디바운스
+/// 검증은 SQL 측에서 이미 수행됨 — 본 행은 *발송 자격 있음*을 의미.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RateAlertMatch {
+    pub subscription_id: i64,
+    pub webhook_url: String,
+    pub signing_secret: String,
+    pub match_count: i64,
+    pub threshold_count: i32,
+    pub threshold_window_secs: i32,
 }
 
 /// Off-chain `address → human label` 매핑 (S09 / M003).
