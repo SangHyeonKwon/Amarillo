@@ -586,3 +586,93 @@
   (silent default 차단). verify HTTP가 `args` 필드의 *존재*를 단언
   (`hasOwnProperty`). 라이브 디코드 실패 케이스는 *시드/입력 데이터 의존*
   — 자동 시뮬 어렵고 *수동 스모크*로 위임.
+
+## D028 — S12.1 세분화 명세: SLIPPAGE 3 + ALLOWANCE 1, fallback 유지
+
+- **결정**: `ErrorCategory`에 **4 신규 세부 카테고리**만 가산. 나머지 4
+  (DEADLINE_EXPIRED / UNAUTHORIZED / TRANSFER_FAILED / UNKNOWN)는 불변.
+  - `SLIPPAGE_EXCEEDED` 유지 + 3 신규: `SLIPPAGE_AMOUNT_OUT`(매수) /
+    `SLIPPAGE_AMOUNT_IN`(매도) / `SLIPPAGE_PRICE_IMPACT`(풀 가격 한도).
+  - `INSUFFICIENT_BALANCE` 유지 + 1 신규: `INSUFFICIENT_ALLOWANCE`
+    (ERC-20 allowance, 진단 메시지가 *완전히 다름* — approve를 호출하는
+    행동이 잔액 충전과 별개).
+  - 총 6 → 10. 기존 generic은 *fallback*으로 유지.
+- **이유**:
+  - dApp 개발자 가치 우선: `SLIPPAGE_EXCEEDED`/`INSUFFICIENT_BALANCE`는 *진단
+    메시지가 가장 자주 부정확한* 두 카테고리. 분기 후 *맞춤형 액션*이 즉시
+    드러남(예: `amountOutMin` 올리기 vs `approve` 호출).
+  - 다른 4 카테고리(UNAUTHORIZED 등)는 *세부 분기 가치 낮음* — 마이그레이션
+    부담만 가산. 첫 사용자 요구가 오면 추후 별 슬라이스.
+  - fallback 유지 = PostgreSQL `ALTER TYPE ... DROP VALUE` 제약 회피 +
+    historical 데이터 재분류 부담 0 (backward compat).
+- **스코프**:
+  - `migrations/20240109000001_subdivide_categories.sql`: 4 ADD VALUE +
+    4 INSERT (`category_diagnosis` 시드, TEXT PK라 enum 값 사용 X)
+  - Rust `ErrorCategory` enum 4 신규 variant + `FromStr` + `as_wire` +
+    `error_category_to_sql` 4건씩
+  - 프론트 TS union 4 신규 + `ERROR_CATEGORIES` 배열 + label/color helper
+- **트레이드오프**:
+  - 세부 카테고리 4개 → 클라이언트 분기 코드 증가. 운영 측에선 fallback도
+    여전히 매핑되어야 — *backward compat 비용*.
+  - 다른 4 카테고리는 *세분화 가치 X*로 판단 — 향후 변경 시 가산 가능, 제거는
+    어려움(enum DROP VALUE 제약 일관). 신중한 *추가만* 방향.
+- **검증 제약(D009~D027 일관)**: classifier 단위테스트(세부 매칭 + fallback) +
+  마이그레이션 멱등(`IF NOT EXISTS` + `ON CONFLICT DO NOTHING`) + verify
+  SEEDED set 확장 후 ALL PASS. 라이브 메인넷 자동 회귀는 docker compose
+  시드 의존.
+
+## D029 — PostgreSQL enum 확장 패턴: ALTER TYPE ADD VALUE IF NOT EXISTS
+
+- **결정**: 마이그레이션은 `ALTER TYPE error_category ADD VALUE IF NOT EXISTS
+  'XXX'` 4회 + `INSERT INTO category_diagnosis ... ON CONFLICT DO NOTHING`
+  1회를 *같은 트랜잭션*에 배치. PostgreSQL 16+에서 트랜잭션 내 ADD VALUE +
+  같은 트랜잭션 내 시드 INSERT 모두 안전. `category_diagnosis.error_category`
+  는 *TEXT PK*라 enum 값 사용 X → 새 enum 값을 같은 트랜잭션 내에서 *직접
+  사용하지 않음*. 추가 안전 마진.
+- **이유**:
+  - `IF NOT EXISTS`로 멱등 (재실행 안전) — sqlx migration 재실행 + docker
+    compose 재기동 모두 무영향.
+  - PostgreSQL `ALTER TYPE ... DROP VALUE`는 9.4+에서 *부분 지원* (현재 16+
+    에서도 사실상 미사용 — 트랜잭션 안전성 + 인덱스/제약 의존성 검사 부담).
+    *제거 X, 추가만* 방향이 backward compat 일관.
+  - `category_diagnosis.error_category`가 TEXT인 점이 *우연한 안전망* —
+    enum 컬럼이면 새 값 INSERT 시 트랜잭션 내 사용 제약. 우리는 그 제약을
+    피해 갔음 (S12 설계의 부수 효과).
+- **스코프**: `migrations/20240109000001_subdivide_categories.sql` 단일 파일.
+  BEGIN/COMMIT 한 블록 + 9 SQL 문(4 ALTER + 1 multi-row INSERT).
+- **트레이드오프**:
+  - enum 정리는 *영영 불가*에 가까움 — 신중한 추가만. 향후 *대규모 enum 재구성*
+    필요 시 (예: 14 → 20 카테고리), 새 enum 타입 생성 → 컬럼 마이그레이션 →
+    구 enum drop 패턴 (큰 분량).
+  - 기존 데이터 reclassify는 본 마이그레이션 스코프 밖 — 새 트랜잭션만 세부
+    카테고리. 운영자가 *full reclassify* 원하면 별 절차.
+- **검증 제약(D028 일관)**: db `--ignored` 통합테스트가 마이그레이션을 자동
+  실행 후 통과 → 멱등 + 시드 행 4 추가 확인. cargo test 재실행이 *마이그레이션
+  실수* 즉시 잡음.
+
+## D030 — classifier 룰 우선순위: 세부 카테고리 먼저, generic은 fallback
+
+- **결정**: classifier 룰 매칭 순서를 *더 구체적인 세부 카테고리를 먼저*로
+  유지. 예: `"too little received"` → `SLIPPAGE_AMOUNT_OUT`, `"too much
+  requested"` → `SLIPPAGE_AMOUNT_IN`, `"price slipped"` / `"amount out"` →
+  `SLIPPAGE_PRICE_IMPACT`. 그 외 일반 `"slippage"` 키워드만 등장하면 *fallback*
+  `SLIPPAGE_EXCEEDED`. `"allowance"` 패턴은 `"balance"`보다 *우선* 매칭 —
+  순서가 깨지면 `INSUFFICIENT_BALANCE`로 떨어지는 회귀 위험.
+- **이유**:
+  - *구체적인 키워드*가 먼저 평가되어야 *세부 카테고리*가 잡힘. `"allowance"`
+    가 `"balance"` 매칭 패턴(`"insufficient"`/`"balance"`)에 흡수되면 잘못
+    분류됨 — 회귀 가드 단위테스트가 검증.
+  - 신규 트랜잭션은 *세부 카테고리*가 우선이라 fallback은 *애매한 slippage*
+    혹은 *세부 패턴 미매칭*일 때만 사용 → 시간이 지나면 fallback 사용 빈도
+    ↓. 그래도 *제거는 어려움*(D028/D029 일관).
+- **스코프**: `crates/decoder/src/classifier.rs` 룰 우선순위 명시. 단위테스트
+  `test_classify_insufficient_allowance` / `test_classify_slippage_amount_out`
+  / `_amount_in` / `_price_impact` / `_slippage_generic_fallback`이 회귀
+  가드.
+- **트레이드오프**:
+  - 룰 순서 의존 = *코드 리딩 부담* (위에서 아래로 평가, *명시적 짧은 keyword
+    매칭이 먼저*). 코드 주석 + 단위테스트로 보완.
+  - 우리 시드 키워드 풀이 *작아* 순서 정렬 비용 낮음 — 시드 확장 시 (예:
+    50개 패턴) 데이터 구조(우선순위 큐 또는 정규식 트리)로 리팩토링 후보.
+- **검증 제약(D028/D029 일관)**: decoder 단위테스트 5 신규 case + 회귀 가드.
+  라이브 메인넷 revert reason 분포 시뮬 어렵고 시드 데이터 의존.

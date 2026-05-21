@@ -19,9 +19,16 @@ export type IsoDateTime = string;
 export type IsoDate = string;
 
 /** `FailedTransaction.error_category` — SCREAMING_SNAKE_CASE on the wire. */
+// S12.1 — 4 신규 세부 카테고리(`SLIPPAGE_AMOUNT_OUT` / `SLIPPAGE_AMOUNT_IN` /
+// `SLIPPAGE_PRICE_IMPACT` / `INSUFFICIENT_ALLOWANCE`)가 fallback (SLIPPAGE_EXCEEDED /
+// INSUFFICIENT_BALANCE) 위에 가산. classifier는 우선 세부 매칭, 미매칭 시 fallback.
 export type ErrorCategory =
   | "INSUFFICIENT_BALANCE"
+  | "INSUFFICIENT_ALLOWANCE"
   | "SLIPPAGE_EXCEEDED"
+  | "SLIPPAGE_AMOUNT_OUT"
+  | "SLIPPAGE_AMOUNT_IN"
+  | "SLIPPAGE_PRICE_IMPACT"
   | "DEADLINE_EXPIRED"
   | "UNAUTHORIZED"
   | "TRANSFER_FAILED"
@@ -29,7 +36,11 @@ export type ErrorCategory =
 
 export const ERROR_CATEGORIES: ErrorCategory[] = [
   "INSUFFICIENT_BALANCE",
+  "INSUFFICIENT_ALLOWANCE",
   "SLIPPAGE_EXCEEDED",
+  "SLIPPAGE_AMOUNT_OUT",
+  "SLIPPAGE_AMOUNT_IN",
+  "SLIPPAGE_PRICE_IMPACT",
   "DEADLINE_EXPIRED",
   "UNAUTHORIZED",
   "TRANSFER_FAILED",

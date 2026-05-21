@@ -285,19 +285,37 @@ joining `data.failed.error_category` against the self-owned
 }
 ```
 
-All six current `ErrorCategory` variants (`UNKNOWN`, `INSUFFICIENT_BALANCE`,
-`SLIPPAGE_EXCEEDED`, `DEADLINE_EXPIRED`, `UNAUTHORIZED`, `TRANSFER_FAILED`)
-ship seeded with `source: "builtin"`, so for any classified failure
-`diagnosis` is non-null. `null` is still the contract for categories an
-operator hasn't seeded yet — silent default is intentionally not allowed
-(D014).
+All **ten** current `ErrorCategory` variants ship seeded with
+`source: "builtin"`, so for any classified failure `diagnosis` is non-null.
+`null` is still the contract for categories an operator hasn't seeded yet —
+silent default is intentionally not allowed (D014).
+
+| Category | Meaning | Notes |
+|----------|---------|-------|
+| `UNKNOWN` | Couldn't classify from the revert reason. | Fallback. |
+| `INSUFFICIENT_BALANCE` | Sender lacks the token / ETH balance. | Includes `"STF"`, `"exceeds balance"`. |
+| `INSUFFICIENT_ALLOWANCE` *(S12.1)* | ERC-20 allowance shortfall (caller must `approve` first). | Split from `INSUFFICIENT_BALANCE` — the fix is different (call `approve`, not top up). |
+| `SLIPPAGE_EXCEEDED` | Generic slippage — fallback when no specific sub-category matches. | Kept as fallback for backward compat. |
+| `SLIPPAGE_AMOUNT_OUT` *(S12.1)* | Buy-side slippage — output fell below `amountOutMin`. | `"too little received"`. |
+| `SLIPPAGE_AMOUNT_IN` *(S12.1)* | Sell-side slippage — input exceeded `amountInMax`. | `"too much requested"`. |
+| `SLIPPAGE_PRICE_IMPACT` *(S12.1)* | Pool price moved past `sqrtPriceLimitX96` during execution. | `"price slipped"` / `"amount out"`. |
+| `DEADLINE_EXPIRED` | Mined after the specified deadline. | |
+| `UNAUTHORIZED` | Caller lacks ownership or approval. | |
+| `TRANSFER_FAILED` | An ERC-20 transfer returned false / threw. | |
+
+The four S12.1 variants are *additive* — kept alongside the original generic
+categories (`SLIPPAGE_EXCEEDED`, `INSUFFICIENT_BALANCE`) so historical data
+classified before the subdivision lives on unchanged (D028: PostgreSQL
+`ALTER TYPE ... DROP VALUE` is restricted, so backward compat is enforced
+by *additivity*). New transactions get the more specific category whenever
+the classifier matches a sub-pattern; otherwise they fall back to the
+generic. The `category_diagnosis` seed carries a distinct `message` +
+`recommended_action` for each sub-category so dApp developers see the
+right fix in one round-trip.
 
 Operators tune the messaging by `INSERT INTO category_diagnosis (...) ON
 CONFLICT (error_category) DO UPDATE SET ...` — same self-owned seed
-philosophy as `function_signature` (D015 / D016). enum *subdivision* (e.g.
-`SLIPPAGE_EXCEEDED` → `SLIPPAGE_PRICE_IMPACT` / `SLIPPAGE_AMOUNT_OUT`) is a
-separate slice (S12.1 sketch) — it requires migrating the Postgres enum and
-extending the classifier rules, which is a context-1 unit on its own.
+philosophy as `function_signature` (D015 / D016).
 
 ### Response `400` / `404`
 

@@ -11,7 +11,17 @@ use serde::Serialize;
 #[sqlx(type_name = "error_category", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCategory {
     InsufficientBalance,
+    /// S12.1: ERC-20 allowance 부족 — `INSUFFICIENT_BALANCE`의 *진단 메시지가 다름*
+    /// (approve를 호출해야 함). classifier가 `"allowance"` 패턴 매칭.
+    InsufficientAllowance,
     SlippageExceeded,
+    /// S12.1: 매수 슬리피지 — `"too little received"`. fallback은 `SLIPPAGE_EXCEEDED`.
+    SlippageAmountOut,
+    /// S12.1: 매도 슬리피지 — `"too much requested"`. fallback은 `SLIPPAGE_EXCEEDED`.
+    SlippageAmountIn,
+    /// S12.1: 풀 가격 영향 한도 초과 — `"price slipped"` / `"amount out"`. fallback은
+    /// `SLIPPAGE_EXCEEDED`.
+    SlippagePriceImpact,
     DeadlineExpired,
     Unauthorized,
     TransferFailed,
@@ -27,7 +37,11 @@ impl std::str::FromStr for ErrorCategory {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "INSUFFICIENT_BALANCE" => Ok(Self::InsufficientBalance),
+            "INSUFFICIENT_ALLOWANCE" => Ok(Self::InsufficientAllowance),
             "SLIPPAGE_EXCEEDED" => Ok(Self::SlippageExceeded),
+            "SLIPPAGE_AMOUNT_OUT" => Ok(Self::SlippageAmountOut),
+            "SLIPPAGE_AMOUNT_IN" => Ok(Self::SlippageAmountIn),
+            "SLIPPAGE_PRICE_IMPACT" => Ok(Self::SlippagePriceImpact),
             "DEADLINE_EXPIRED" => Ok(Self::DeadlineExpired),
             "UNAUTHORIZED" => Ok(Self::Unauthorized),
             "TRANSFER_FAILED" => Ok(Self::TransferFailed),
@@ -45,7 +59,11 @@ impl ErrorCategory {
     pub fn as_wire(&self) -> &'static str {
         match self {
             Self::InsufficientBalance => "INSUFFICIENT_BALANCE",
+            Self::InsufficientAllowance => "INSUFFICIENT_ALLOWANCE",
             Self::SlippageExceeded => "SLIPPAGE_EXCEEDED",
+            Self::SlippageAmountOut => "SLIPPAGE_AMOUNT_OUT",
+            Self::SlippageAmountIn => "SLIPPAGE_AMOUNT_IN",
+            Self::SlippagePriceImpact => "SLIPPAGE_PRICE_IMPACT",
             Self::DeadlineExpired => "DEADLINE_EXPIRED",
             Self::Unauthorized => "UNAUTHORIZED",
             Self::TransferFailed => "TRANSFER_FAILED",

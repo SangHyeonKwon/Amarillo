@@ -86,6 +86,16 @@ means decoding wasn't attempted (no input bytes) or failed; the surrounding
 arrive as **decimal strings** so `uint256` round-trips through JS without
 losing precision past 2^53.
 
+**S12.1: subdivided categories.** `error_category` has ten possible values
+now — the original six plus four sub-categories that distinguish slippage
+flavors and `INSUFFICIENT_ALLOWANCE` from generic `INSUFFICIENT_BALANCE`.
+The `diagnosis.message` and `recommended_action` are tuned per
+sub-category, so a buy-side `SLIPPAGE_AMOUNT_OUT` failure tells you to
+raise `amountOutMin` rather than the generic "increase slippage tolerance"
+the parent category gives. Branch on the sub-category in your UI when you
+have it; fall back to the parent for backward compat. See
+[`api-failed-tx.md`](api-failed-tx.md#response-200) for the full table.
+
 ### TypeScript
 
 ```typescript
