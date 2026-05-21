@@ -73,6 +73,30 @@ M003 분해 패턴 일관: **M004 = S10 ∧ S11 ∧ S12** (S13 SDK는 `[sketch]`
 **S12 — 카테고리 세분화 v2 + 진단 메시지/추천액션** `[sketch]`
 **S13 — 개발자 SDK/문서 (TS/Python 미니멈 클라이언트 + cookbook)** `[sketch]`
 
+## M005 — Bot Operator Persona (출하 정의)
+
+> "봇 운영자가 자기 봇의 실패 *패턴*을 *임계율* 알림으로 받는다 — 건별 노이즈 없이."
+
+페르소나 = **봇 운영자**(D018). M001~M004는 dApp 개발자 페르소나 직격이었다면,
+M005는 새 페르소나 진입 — *건별* 알림(S08)은 봇 운영자에게 노이즈가 됨. 봇은
+실패가 *간헐적으로* 발생하면 정상 운영의 일부지만 *급증*하면 봇이 망가졌다는
+신호. M005는 그 비정상 패턴을 *임계율*로 잡아 알림.
+
+**S14 — 임계율 집계 알림** 수용 기준 (mechanically checkable):
+- `alert_subscription`에 `sub_type` ('per_event' | 'rate_threshold') 컬럼 가산 +
+  `threshold_count`/`threshold_window_secs`/`debounce_secs` (rate 모드 필수).
+  기존 행은 default `sub_type='per_event'` — 완전 호환(silent default 금지 정신
+  일관, 명시 default).
+- `POST /v1/alert-subscriptions` body에 rate 필드 받기. 잘못된 조합(예: rate인데
+  threshold 누락)은 **400**.
+- 디스패처: rate 모드 sub은 시간 윈도우 내 매칭 실패 count >= threshold면
+  1회 webhook 발송 + `debounce_secs` 동안 같은 sub은 무시.
+- `scripts/verify-alerts.sh`에 rate sub 시드 + 의미 단언 추가, 프론트 `/alerts`
+  페이지에 rate 설정 폼 + rate 모드 시각화.
+
+**S15 — 봇 라벨(자기 봇 식별)** `[sketch]` — S09 contract_label 확장 또는 별 테이블.
+**S16 — 봇 운영자 cookbook 시나리오** `[sketch]` — docs/cookbook.md에 봇 시나리오 추가.
+
 ## 공통 비기능 요건
 
 - CLAUDE.md 절대 규칙 준수 (no `unwrap()` in prod, parameterized SQL, 마이그레이션 경유 등 — KNOWLEDGE.md)

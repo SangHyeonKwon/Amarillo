@@ -250,3 +250,30 @@
   검증*까지(TS는 `tsc --noEmit`로 typecheck, Python은 `python -m py_compile`로
   syntax check). 라이브 호출은 docker compose + verify 스크립트와 동일 환경
   요구라 본 슬라이스에서는 syntax/type 검증까지 + 수동 스모크 절차 문서화.
+
+## D018 — M005 방향: 봇 운영자 페르소나 첫 진입, 임계율 집계 알림
+- **결정**: M005 = **봇 운영자 페르소나 첫 진입**. 핵심 가치는 *시간 윈도우
+  임계율 알림* (BACKLOG #1, D012 MVP 제외분). 기존 `alert_subscription`에
+  `sub_type` 컬럼 + `threshold_count` / `threshold_window_secs` / `debounce_secs`
+  컬럼 가산. 첫 슬라이스 **S14**가 핵심 메커니즘. S15(봇 라벨)·S16(cookbook
+  봇 시나리오)는 후속(`[sketch]`).
+- **이유**: M001~M004가 dApp 개발자 페르소나(진단/SDK)에 집중했으므로, 다음
+  호흡은 *새 페르소나 확장*. 봇 운영자는 "내 봇 망가졌어?"가 1차 잡 — 건별
+  알림은 *노이즈* (정상 봇도 간헐적 실패함), 임계율 알림은 *시그널* (급증=망가
+  진 신호). D012(M003)의 MVP 제외분이 본 마일스톤에서 실현.
+- **스코프**: D003 동결 유지(Ethereum + Uniswap V3). 임계 표면은 **기존 테이블
+  가산**으로 단순화 — 새 테이블 분리는 작업량 큼(별도 검증·인덱싱·매칭 룰
+  복잡). 컬럼 가산 + `sub_type` 명시(silent default 금지 정신 일관, 기본값
+  `'per_event'`로 backwards compat). 디바운스는 *시간 기반*만 — 카운트 기반은
+  별 단위.
+- **트레이드오프**:
+  - rate 모드는 *시간 윈도우 내 count* 만 비교. 비율(예: tx_count 대비
+    실패율)이나 추세(예: 이전 시간 대비 증가율) 계산은 별 슬라이스(S14.1
+    sketch). 본 마일스톤은 *절대 임계* 만으로도 봇 운영자 1차 잡 충족함.
+  - rate sub의 디바운스는 *마지막 발송 시각 + debounce_secs*가 윈도우. 같은
+    sub의 *서로 다른* 카테고리/주소는 별 매칭이지만 디바운스는 sub_id 단위.
+  - 기존 per-event sub은 *완전 호환* — sub_type='per_event' default + dispatcher
+    분기로 동일 동작 보장.
+- **검증 제약(D009~D017 일관)**: 통합 PG(매칭/디바운스 쿼리) + verify HTTP(rate
+  sub 생성 + 발송 시뮬레이션) + clippy/fmt + web typecheck/test/build. 라이브
+  임계율 시뮬은 시드 데이터의 실패 tx 시간 분포 기반 — 자동 검증 가능.
