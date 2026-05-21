@@ -304,3 +304,30 @@
 - **검증 제약(D009~D018 일관)**: 통합 PG(insert/delete 라운드트립) + verify HTTP
   (POST 201 / DELETE 204·404 / 잘못된 주소 400) + cookbook 4 시나리오 자동
   검증 어려움 → 라이브 호출은 docker compose + 수동 스모크(README/cookbook 명시).
+
+## D020 — DNS-time SSRF: reqwest dns_resolver hook + ip_is_safe 공유
+- **결정**: BACKLOG #1 — DNS rebinding 공격 차단. dispatcher의 reqwest client에
+  custom `dns_resolver`를 주입해 *resolved IP*가 unsafe면 connect 전에 실패시킴.
+  기존 `webhook_url_is_safe`의 IP 검증 로직을 `ip_is_safe(ip: IpAddr) -> Result<(),
+  UnsafeUrlReason>` public 함수로 분리해 *두 검증 단계가 같은 정책*을 공유.
+- **이유**: `webhook_url_is_safe`는 *URL 파싱 시점* IP 검증만 — host가
+  hostname이면 통과. 공격자가 `attacker.com`을 처음엔 공개 IP로 응답 후
+  dispatcher가 connect 직전 resolve 다시 하면 사설 IP(`127.0.0.1`)로 rebind →
+  내부 서비스 SSRF. *resolved IP* 검증으로 차단. S08-T02 코멘트의 "잔여 리스크
+  (정직)" 항목을 닫는다.
+- **스코프**: 신규 의존 0 — stdlib `to_socket_addrs`(blocking)를
+  `tokio::task::spawn_blocking`으로 호출 + `reqwest::dns::Resolve` trait 구현.
+  hickory-dns 같은 async resolver lib 미도입 (D008/D013/D015 정신 일관).
+  의도적 정책 단순화 — OS resolver 신뢰 + 결과 IP만 검증.
+- **트레이드오프**:
+  - blocking resolver는 thread-pool 부담 — dispatcher의 `MAX_CONCURRENT_POSTS=10`
+    범위에선 무문제.
+  - hickory-dns(async)는 더 빠르지만 의존 1개 + 학습 곡선. 첫 사용자 부하 요구
+    없으면 *낭비*.
+  - DNS *response 캐싱* race는 *우리 코드 밖* (커널 stub resolver / nscd) —
+    OS resolver 신뢰 한도. 완전 차단은 hickory-dns의 직접 UDP resolution까지
+    가야 가능 (별 단위, BACKLOG로 잠재 이월).
+- **검증 제약(D009~D019 일관)**: 단위테스트(`SafeDnsResolver`가 unsafe IP를
+  `Err`로 반환) + 기존 `webhook_url_is_safe` 단위테스트 무회귀 + verify-alerts.sh
+  무회귀. 라이브 DNS rebinding 시뮬은 mock DNS server 필요 — 환경 부담 큼,
+  수동 스모크(공격 시뮬 도구 별도)로 위임.

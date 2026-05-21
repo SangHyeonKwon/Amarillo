@@ -11,8 +11,9 @@
 - **사전조건** — 시작 전 필요한 결정·인프라
 - **예상 크기** — 슬라이스 단위 (작 / 중 / 큼)
 
-상태: 미완료 6 / 완료 8 (완료분은 ROADMAP 한 줄 압축).
-(임계율 알림 #1과 S15 봇 라벨/cookbook은 M005 출하로 완료 — 본 카탈로그에서 제거.)
+상태: 미완료 6 / 완료 9 (완료분은 ROADMAP 한 줄 압축).
+(임계율 알림과 S15 봇 라벨/cookbook은 M005 출하로 완료, DNS-time SSRF는
+HARDEN3 단독 PR로 완료 — 본 카탈로그에서 제거.)
 
 ---
 
@@ -81,18 +82,22 @@ S13의 *운영성* 확장 — 카피 가능 examples → 정식 패키지.
 
 ## 보안 / 운영 단독 단위
 
-### DNS-time SSRF 검사 (custom DNS resolver)
+### OS resolver 캐시 race 차단 (hickory-dns 직접 UDP)
 
-HARDEN 잔여 — S08 webhook URL 검증의 *DNS rebinding* 갭 닫기.
+HARDEN3 *잔여* — `SafeDnsResolver`(reqwest dns_resolver hook + stdlib
+`to_socket_addrs`)는 OS resolver를 통하므로 *커널 stub resolver* (nscd /
+systemd-resolved)가 캐시한 stale IP는 우리 코드 밖. 완전 차단은 직접 UDP
+DNS resolution까지.
 
-- **가치**: 현재는 URL 파싱 시점 IP 검증만 — 공격자가 *처음엔* 공개 IP
-  반환했다가 dispatcher가 connect 직전에 사설 IP로 rebind하면 우회 가능. DNS
-  resolution 시점 IP 검증으로 완전 차단.
-- **리스크**: med — custom DNS resolver 구현(reqwest의 `dns_resolver` hook 또는
-  hyper-level connect). OS별 동작 차이. hickory-dns 같은 lib 의존 가능성.
+- **가치**: 잔여 SSRF 갭 해소. 실무 리스크는 낮음(공격자가 우리 OS의 stub
+  resolver 캐시까지 poisoning해야 가능) — 첫 사용자 요구 없으면 *낭비*에
+  가까움.
+- **리스크**: 중-큼 — hickory-dns(또는 trust-dns) 의존 도입 + 자체 UDP/TCP
+  resolver 운영 + 캐시 정책 + 환경 차이(IPv4-only vs dual-stack 등).
 - **페르소나**: 보안 운영자 (간접)
-- **사전조건**: dns_resolver 라이브러리 의존 추가 결정.
-- **예상 크기**: 작-중. **단독 PR 가치 — 다른 슬라이스와 독립**. 빠른 wins.
+- **사전조건**: hickory-dns 의존 도입 결정. SafeDnsResolver와의 통합 (trait
+  같지만 backend 교체).
+- **예상 크기**: 중. 첫 사용자 명시 요청 후 진행 권장.
 
 ### 인증 미들웨어 도입 (admin/write API 보호)
 
@@ -128,25 +133,24 @@ FE-WIRE 후속 — 기존 `pool` / `trader` 페이지를 실제 신규 API(`/v1/
 
 ---
 
-## 우선순위 (추천 — M005 출하 후 갱신)
+## 우선순위 (추천 — HARDEN3 출하 후 갱신)
 
 | # | 항목 | 가치 | 크기 | 페르소나 |
 |---|------|------|------|---------|
-| 1 | DNS-time SSRF | ★★ (보안 잔여, M005 SUMMARY가 끌어올림) | 작-중 | 보안 운영자 |
-| 2 | AmarilloClient admin 메서드 (S15 후속) | ★★ (M005 완결성 마감) | 작 | 봇 운영자 |
+| 1 | AmarilloClient admin 메서드 (S15 후속) | ★★ (M005 완결성 마감) | 작 | 봇 운영자 |
+| 2 | 인증 미들웨어 도입 | ★★★ (운영 필수) | 큼 (별 마일스톤) | 운영자 |
 | 3 | S11.1 ABI args 디코딩 | ★★ (진단 깊이) | 중-큼 | dApp 개발자 |
-| 4 | 인증 미들웨어 도입 | ★★★ (운영 필수) | 큼 (별 마일스톤) | 운영자 |
-| 5 | S12.1 enum 세분화 | ★★ (정밀도) | 큼 | dApp 개발자 |
-| 6 | S13.1 패키지 게시 | ★ (운영성) | 작/중 | dApp 개발자 |
+| 4 | S12.1 enum 세분화 | ★★ (정밀도) | 큼 | dApp 개발자 |
+| 5 | S13.1 패키지 게시 | ★ (운영성) | 작/중 | dApp 개발자 |
+| 6 | OS resolver 캐시 race (hickory-dns) | ★ (잔여 SSRF 갭, 첫 요구 후) | 중 | 보안 운영자 |
 | 7 | Pools/Traders FE | ☆ (D001 정신) | 작 | 데모 사용자 |
 
 **해석**:
-- #1·#2: *빠른 wins* — 보안 잔여(DNS-rebind) 닫기 + M005 완결성(admin 메서드)
-  마감. 둘 다 단독 PR.
-- #3·#5: dApp 개발자 깊이 — *체감 가치 vs 부담*의 균형.
-- #4: 인증 — *별 마일스톤 가치*. 단독 슬라이스로는 부담, M006 또는 M005.1
+- #1: 가장 빠른 wins — S15에서 시작한 M005 표면을 *examples client에 마감*.
+- #2: 인증 — *별 마일스톤 가치*. 단독 슬라이스로는 부담, M006 또는 M005.1
   핵심 슬라이스로.
-- #6: 첫 사용자 명시 요청 후 (D017 정신).
+- #3·#4: dApp 개발자 깊이 — *체감 가치 vs 부담*의 균형.
+- #5·#6: 첫 사용자 명시 요청 후 (D017 / HARDEN3 정신).
 - #7: 영영 안 해도 무방 (D001).
 
 ## 운영 규칙

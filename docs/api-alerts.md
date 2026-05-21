@@ -308,10 +308,22 @@ signed request on the receiver.
 - **SSRF**: scheme + IP-class + name-suffix guard (see endpoint above for
   full list). Redirects are disabled at the HTTP client to block the
   obvious one-hop bypass.
-- **Residual**: DNS-time IP rebinding (an attacker domain that resolves
-  to a private IP at connect time) is **not** caught by name-based
-  rejection alone — connect-time IP check is backlog. Practical risk on
-  the indexer's own network: low; not zero.
+- **DNS-time SSRF (HARDEN3 / D020)**: the dispatcher injects a custom
+  `dns_resolver` (`SafeDnsResolver`) into reqwest. The OS resolver runs
+  on a blocking task, and **every resolved IP** is fed back through the
+  same `db::validators::ip_is_safe` policy that screens URL literals at
+  parse time. Result: an attacker domain that returns a public IP at
+  subscription time but **rebinds to `127.0.0.1` (or any unsafe IP) at
+  connect time** is rejected before the TCP handshake — the resolver
+  returns `Err`, reqwest never opens the socket. Same policy, two
+  enforcement points, single source of truth.
+- **Residual** (after HARDEN3): the OS stub resolver's **response
+  cache** is outside our reach — if a kernel-level resolver (nscd /
+  systemd-resolved) hands us a stale cached IP that was poisoned
+  between our look-ups, we cannot see that. Full closure requires
+  doing DNS over UDP ourselves (hickory-dns-style), which is parked in
+  BACKLOG until first user demand. Practical risk on the indexer's own
+  network: low; not zero.
 - **Secrets**: `signing_secret` is revealed *once* on creation **and
   on rotation** (HARDEN2-T02), never in list responses, never logged.
   `WS_URL` is env-only and also never logged (S07-T02 carryover).
