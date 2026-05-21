@@ -11,11 +11,12 @@
 - **사전조건** — 시작 전 필요한 결정·인프라
 - **예상 크기** — 슬라이스 단위 (작 / 중 / 큼)
 
-상태: 미완료 3 / 완료 14 (완료분은 ROADMAP 한 줄 압축).
+상태: 미완료 2 / 완료 15 (완료분은 ROADMAP 한 줄 압축).
 (임계율 알림과 S15 봇 라벨/cookbook은 M005 출하, DNS-time SSRF는 HARDEN3
 단독 PR로 완료, AmarilloClient admin 메서드는 EXAMPLES-ADMIN 단독 PR로 완료,
-인증 미들웨어는 M006 출하로 완료, S11.1 ABI args 디코딩 + **S12.1 ErrorCategory
-세분화**는 각각 별 단독 PR로 완료 — 본 카탈로그에서 각 항목 제거.)
+인증 미들웨어는 M006 출하로 완료, S11.1 ABI args 디코딩·S12.1 ErrorCategory
+세분화·**HARDEN4 toolchain lint 정리**는 각각 별 단독 PR로 완료 — 본 카탈로그
+에서 각 항목 제거.)
 
 ---
 
@@ -54,27 +55,6 @@ DNS resolution까지.
   같지만 backend 교체).
 - **예상 크기**: 중. 첫 사용자 명시 요청 후 진행 권장.
 
-### 별 단위 hardening — toolchain 회귀 lint 정리
-
-S16에서 toolchain 1.92(rust-clippy 1.92) 회귀 lint 2건을 *인라인 fix*로 게이트
-통과 — 의미 무변경, 의도 보존이지만 *별 슬라이스에서 깔끔하게 리팩토링* 후보.
-
-- **가치**: 작음 — 코드 품질·일관성. lint allow 제거 + 더 명확한 표현.
-- **리스크**: 작음 — test 코드만 영향, 의미 보존 단순 리팩토링.
-- **페르소나**: 개발자 (자기 코드베이스 품질)
-- **사전조건**: 없음.
-- **예상 크기**: 작 — 두 위치 fix + clippy 무회귀.
-- **위치**:
-  - `crates/decoder/src/events.rs` `test_decode_swap_event` —
-    `#[allow(clippy::cmp_owned)]` + `BigDecimal::from(0)` 비교. *named binding*
-    (`let zero = BigDecimal::from(0); assert!(s.amount_in > zero);`) 패턴으로
-    리팩토링하면 lint allow 제거 가능.
-  - `crates/indexer/src/worker.rs` (이미 인라인 fix 완료 — `&chain` → `chain`).
-    *별 단위에 합쳐 한 PR로 깔끔하게* 정리 가능.
-
-본 항목은 *작은 단위*이라 별 마일스톤 가치 X, *언제든 단독 PR*. 첫 사용자
-요구 없어도 자기 코드 품질 정신으로 가능.
-
 ---
 
 ## 단독 단위 (낮은 우선순위)
@@ -93,25 +73,22 @@ FE-WIRE 후속 — 기존 `pool` / `trader` 페이지를 실제 신규 API(`/v1/
 
 ---
 
-## 우선순위 (추천 — S12.1 출하 후 갱신)
+## 우선순위 (추천 — HARDEN4 출하 후 갱신)
 
 | # | 항목 | 가치 | 크기 | 페르소나 |
 |---|------|------|------|---------|
 | 1 | S13.1 패키지 게시 | ★ (운영성) | 작/중 | dApp 개발자 |
 | 2 | OS resolver 캐시 race (hickory-dns) | ★ (잔여 SSRF 갭, 첫 요구 후) | 중 | 보안 운영자 |
-| 3 | 별 단위 hardening (toolchain 회귀 lint) | ☆ (코드 품질) | 작 | 개발자 |
-| 4 | Pools/Traders FE | ☆ (D001 정신) | 작 | 데모 사용자 |
+| 3 | Pools/Traders FE | ☆ (D001 정신) | 작 | 데모 사용자 |
 
 **해석**:
-- S12.1 출하로 **M004 깊이 시리즈 자연 마감** (S10 root_cause → S11 selector
-  → S11.1 args → S12 diagnosis → S12.1 enum 세분화). dApp 개발자 페르소나
-  완결 — 다음 호흡은 *운영성*(S13.1) / *보안*(hickory-dns) / *코드 품질*
-  (hardening) / *데모*(FE) / *새 페르소나*(M007 분기) 중 사용자 결정.
-- #1: 첫 사용자 명시 요청 후 권장 (D017 정신) — 게시는 *코드 분리 작 + 운영
-  중간*. 게시 토큰 / CI 자동화 / semver 관리는 *별 운영 단위*.
+- HARDEN4 출하로 toolchain 회귀 lint 정리 마감 — 코드 품질 호흡 정리.
+- M004 깊이 시리즈는 S11.1/S12.1 출하로 자연 마감, dApp 개발자 페르소나
+  완결. 남은 후보는 *운영성*(S13.1) / *보안*(hickory-dns) / *데모*(FE) /
+  *새 페르소나*(M007 분기) — 모두 *첫 사용자 요구* 또는 *명시 결정* 후 진입.
+- #1: 첫 사용자 명시 요청 후 권장 (D017 정신).
 - #2: 첫 요구 후 (HARDEN3 정신).
-- #3: *언제든 단독 PR* — 작은 hardening, 코드 품질 정신.
-- #4: 영영 안 해도 무방 (D001).
+- #3: 영영 안 해도 무방 (D001).
 - **M007 분기 후보**(M006 출하로 분기 가능 — GSD-2 원칙 일관): multi-key
   runtime 회전 / 거래소 KYC 매핑 / 자동화된 incident response / RPC 성능
   대시보드. 사용자 결정 시 BACKLOG와 같이 시드.
