@@ -350,26 +350,3 @@ cargo run -p api
 ./scripts/verify-alerts.sh              # alerts CRUD + HMAC + 401 cases
 ./scripts/verify-failed-tx-by-label.sh  # by-label + admin endpoints
 ```
-
-## Status
-
-| Milestone | Status | Summary |
-|-----------|--------|---------|
-| M001 — Failure Intelligence Core | ✅ | [`.gsd/M001-SUMMARY.md`](.gsd/M001-SUMMARY.md) |
-| M002 — Real-time Failure Pipeline | ✅ | [`.gsd/M002-SUMMARY.md`](.gsd/M002-SUMMARY.md) |
-| M003 — Actionable Alerts + label join | ✅ | [`.gsd/M003-SUMMARY.md`](.gsd/M003-SUMMARY.md) |
-| M004 — Diagnostic Depth | ✅ | [`.gsd/M004-SUMMARY.md`](.gsd/M004-SUMMARY.md) (+ S11.1 args, S12.1 enum 세분화) |
-| M005 — Bot Operator Persona | ✅ | [`.gsd/M005-SUMMARY.md`](.gsd/M005-SUMMARY.md) |
-| M006 — Operator Auth | ✅ | [`.gsd/M006-SUMMARY.md`](.gsd/M006-SUMMARY.md) |
-
-세 페르소나 완결: **dApp 개발자** (진단 깊이) · **봇 운영자** (rate alerts + 봇 라벨)
-· **운영자** (admin auth + 인프라). 진행 흐름·결정·교훈은 [`.gsd/`](./.gsd/) 폴더에 누적.
-
----
-
-## Key contracts (Ethereum Mainnet)
-
-| Contract | Address |
-|----------|---------|
-| Uniswap V3 Factory | `0x1F98431c8aD98523631AE4a59f267346ea31F984` |
-| Uniswap V3 Router | `0xE592427A0AEce92De3Edee1F18E0157C05861564` |
