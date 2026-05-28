@@ -1,6 +1,6 @@
 <div align="center">
 
-# amarillo
+# defi-tx-indexer
 
 **Ethereum Failure Intelligence API**
 
