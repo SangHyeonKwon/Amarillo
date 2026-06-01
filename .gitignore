@@ -24,3 +24,6 @@ Cargo.lock
 # Python (examples/python-client/)
 __pycache__/
 *.py[cod]
+
+# TUI log (crates/tui writes here by default)
+amarillo-tui.log
