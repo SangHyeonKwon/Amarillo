@@ -271,6 +271,7 @@ Ethereum node (RPC / WebSocket)
 | `crates/api/` | Binary + Lib | axum REST server (auth + 5 guarded routes) |
 | `crates/decoder/` | Library | ABI decode · trace parse · error classifier |
 | `crates/db/` | Library | SQLx models · queries · migrations |
+| `crates/tui/` | Binary | Terminal dashboard — REST API client (ratatui) |
 
 ## Drop-in clients
 
@@ -287,6 +288,21 @@ End-to-end five scenarios (single-tx diagnosis / alerts + HMAC / label distribut
 operator playbook / `/alerts` UI flow): [`docs/cookbook.md`](docs/cookbook.md).
 
 Full API reference + Authentication policy: [`docs/api-failed-tx.md`](docs/api-failed-tx.md).
+
+## Terminal UI
+
+![amarillo TUI — Overview screen](docs/screenshots/tui-overview.png)
+
+```bash
+cargo run -p api                                            # API must be up
+AMARILLO_API_URL=http://127.0.0.1:3000 cargo run -p tui     # terminal dashboard
+```
+
+A second reference client (alongside `web/`) — the failure intelligence in your
+terminal. Pure REST client, so it needs no DB credentials and can point at any
+deployed amarillo instance. Overview (KPIs + category distribution), filterable
+failed-tx table, and call-tree drill-down with decoded args + diagnosis. Details:
+[`crates/tui/README.md`](crates/tui/README.md).
 
 ## Scope (deliberate)
 

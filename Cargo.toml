@@ -5,6 +5,7 @@ members = [
     "crates/db",
     "crates/decoder",
     "crates/indexer",
+    "crates/tui",
 ]
 
 [workspace.package]
@@ -72,3 +73,9 @@ getrandom = "0.2"
 
 # Constant-time equality for admin API key comparison (S16/M006, API layer)
 subtle = { version = "2.5", default-features = false }
+
+# TUI (crates/tui) — terminal client over the REST API
+ratatui = "0.29"
+crossterm = "0.28"          # ratatui 0.29가 의존하는 버전과 일치 (Backend 타입 정합)
+futures-util = "0.3"        # crossterm EventStream(Stream) 구동
+tracing-appender = "0.2"    # 파일 비동기 로깅 (non-blocking + WorkerGuard)
