@@ -6,7 +6,7 @@ mod overview;
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Tabs};
 use ratatui::Frame;
 
@@ -14,34 +14,63 @@ use crate::app::{App, Screen};
 
 /// 한 프레임 전체를 그린다.
 pub fn draw(f: &mut Frame<'_>, app: &App) {
+    let full = f.area();
+    // amarillo 워드마크 배너 — 터미널이 충분히 크면 탭 박스 위에 표시(작으면 생략).
+    let banner_h: u16 = if full.height >= 18 && full.width >= 34 {
+        3
+    } else {
+        0
+    };
     let chunks = Layout::vertical([
+        Constraint::Length(banner_h),
         Constraint::Length(3),
         Constraint::Min(0),
         Constraint::Length(1),
     ])
-    .split(f.area());
+    .split(full);
 
-    render_tabs(f, chunks[0], app);
-    match app.screen {
-        Screen::Overview => overview::render(f, chunks[1], app),
-        Screen::FailedTx => failed_tx::render(f, chunks[1], app),
-        Screen::Detail => detail::render(f, chunks[1], app),
+    if banner_h > 0 {
+        render_banner(f, chunks[0]);
     }
-    render_status(f, chunks[2], app);
+    render_tabs(f, chunks[1], app);
+    match app.screen {
+        Screen::Overview => overview::render(f, chunks[2], app),
+        Screen::FailedTx => failed_tx::render(f, chunks[2], app),
+        Screen::Detail => detail::render(f, chunks[2], app),
+    }
+    render_status(f, chunks[3], app);
 
     if app.show_help {
-        render_help(f, f.area());
+        render_help(f, full);
     }
+}
+
+/// amarillo 워드마크 배너. `amarillo`는 스페인어로 '노란색' — 앰버 그라데이션으로
+/// 카테고리 팔레트(슬리피지 앰버 톤)와 시각적으로 맞춘다.
+fn render_banner(f: &mut Frame<'_>, area: Rect) {
+    let bright = Color::Rgb(0xF4, 0xBD, 0x50);
+    let deep = Color::Rgb(0xE5, 0xA9, 0x3D);
+    let lines = vec![
+        Line::from(Span::styled(
+            " ▄▀█ █▀▄▀█ ▄▀█ █▀█ █ █   █   █▀█",
+            Style::default().fg(bright).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            " █▀█ █ ▀ █ █▀█ █▀▄ █ █▄▄ █▄▄ █▄█",
+            Style::default().fg(deep).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "  failure intelligence · in your terminal",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn render_tabs(f: &mut Frame<'_>, area: Rect, app: &App) {
     let titles = vec!["[1] Overview", "[2] Failed Tx", "[3] Detail"];
     let tabs = Tabs::new(titles)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" amarillo · Failure Intelligence "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" amarillo "))
         .select(app.screen.index())
         .highlight_style(
             Style::default()
