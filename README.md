@@ -291,6 +291,8 @@ Full API reference + Authentication policy: [`docs/api-failed-tx.md`](docs/api-f
 
 ## Terminal UI
 
+![amarillo TUI — Overview screen](docs/screenshots/tui-overview.png)
+
 ```bash
 cargo run -p api                                            # API must be up
 AMARILLO_API_URL=http://127.0.0.1:3000 cargo run -p tui     # terminal dashboard

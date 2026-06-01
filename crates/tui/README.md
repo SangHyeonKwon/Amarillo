@@ -7,18 +7,7 @@ It is a pure **REST API client** (via `reqwest`): it never touches Postgres, so
 it only needs `AMARILLO_API_URL`. Point it at a local server or a deployed
 amarillo instance.
 
-```
-┌ amarillo · Failure Intelligence ───────────────────────────────┐
-│ [1] Overview │ [2] Failed Tx │ [3] Detail                       │
-└─────────────────────────────────────────────────────────────────┘
-  Latest block        Total failed tx        Top category
-  18,000,000          24                     Slippage (amount out)
-
-  Failure distribution by category
-  Slippage (amount out)   ████████████████  12 (48.00%) · 52K gas · 3h ago
-  Insufficient allowance  ████████           8 (32.00%) · 38K gas · 3h ago
-  ...
-```
+![amarillo TUI — Overview screen](../../docs/screenshots/tui-overview.png)
 
 ## Screens
 
